@@ -1,0 +1,717 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "koheesio"
+dynamic = ["version"]
+description = 'The steps-based Koheesio framework'
+readme = "README.md"
+requires-python = ">=3.9, <3.13" # 3.10 is the minimum recommended version
+license = "Apache-2.0"
+keywords = [
+  "data-engineering",
+  "data-pipeline",
+  "data-transformation",
+  "software-engineering",
+  "etl",
+  "pyspark",
+  "spark",
+  "pydantic",
+  "data-validation",
+  "data-processing",
+  "data-quality",
+  "step-based",
+  "modular",
+  "reusable",
+  "workflow",
+]
+authors = [
+  { name = "Danny Meijer", email = "danny.meijer@nike.com" },
+  { name = "Mikita Sakalouski", email = "38785549+mikita-sakalouski@users.noreply.github.com" },
+  { name = "Maxim Mityutko", email = "43565398+maxim-mityutko@users.noreply.github.com" },
+  { name = "Tone Vanden Bergh", email = "60358854+ToneVDB@users.noreply.github.com" },
+  { name = "Pariksheet Barapatre", email = "pbarapatre@gmail.com" },
+  { name = "Riccardo Iacomini", email = "iacomini.riccardo@gmail.com" },
+  { name = "Brend Braeckmans", email = "72923643+BrendBraeckmans@users.noreply.github.com" },
+  { name = "Bruno De Deken", email = "dedekenbruno@gmail.com" },
+  { name = "Nathan Melis", email = "nathanmelis@gmail.com" },
+  { name = "Tyler Richardett", email = "tyler.richardett@gmail.com" },
+  { name = "Federica Emiliani", email = "federica.emiliani1984@gmail.com" },
+  { name = "Louis-Paul Vlx", email = "90868690+louis-paulvlx@users.noreply.github.com" },
+  { name = "Tomasz Zaremba", email = "tomasz@zaremba.it" },
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Natural Language :: English",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "cryptography>=42.0.4", # to address CVE-2024-26130
+  "jsonpickle>2.1.0",
+  "pydantic>=2",
+  "python-decouple>=3.8",
+  "pytz>=2023.3",
+  "pyyaml>=6.0",
+  "tomli>=2.0.1",
+]
+
+[project.urls]
+Documentation = "https://github.com/Nike-Inc/koheesio#readme"
+Issues = "https://github.com/Nike-Inc/koheesio/issues"
+Source = "https://github.com/Nike-Inc/koheesio"
+Project = "https://github.com/orgs/Nike-Inc/projects/4"
+
+[project.optional-dependencies]
+async = ["nest-asyncio>=1.6.0"]
+async-http = [
+  "aiohttp[speedups]>=3.9.5",
+  "aiohttp-retry>=2.8.3",
+  "nest-asyncio>=1.6.0",
+]
+box = ["boxsdk[jwt]==3.8.1"]
+pandas = ["pyspark[pandas-on-spark]>=3.2.0"]
+# NOTE: pyspark<4.0 imports the private `pandas.core.common._builtin_table`
+# symbol (see `pyspark/pandas/groupby.py:50`), which pandas removed in 2.2.0.
+# We intentionally do NOT cap pandas here — instead the upper bound is added
+# in the places where we actually pin pyspark<4.0 (the `dev` env's
+# `extra-dependencies` and the per-pyspark-version test matrix overrides
+# below). End users installing `koheesio[pandas]` alongside pyspark<4 should
+# pin `pandas<2.2` themselves until pyspark 4.0 ships and that constraint
+# is no longer needed.
+pyspark = [
+  "pyspark>=3.2.0",
+  "pyarrow>13",
+  # pyspark<4.0 still imports `distutils.version.LooseVersion`, which was
+  # removed from the stdlib in Python 3.12. setuptools ships a `distutils`
+  # compatibility shim (auto-activated via its `distutils-precedence.pth`),
+  # so installing it restores the import on 3.12+. Drop once we move to
+  # pyspark 4.0 (which no longer uses distutils).
+  "setuptools; python_version >= '3.12'",
+]
+pyspark_connect = ["pyspark[connect]>=3.5"]
+sftp = ["paramiko>=2.6.0"]
+delta = ["delta-spark>=2.2"]
+excel = ["openpyxl>=3.0.0"]
+tableau = ["tableauhyperapi>=0.0.19484", "tableauserverclient>=0.25"]
+snowflake = ["snowflake-connector-python>=3.12.0"]
+dev = ["ruff", "mypy", "pylint", "colorama", "types-PyYAML", "types-requests"]
+test = [
+  "chispa>=0.10.1",
+  "coverage[toml]",
+  "pytest",
+  "pytest-asyncio",
+  "pytest-cov",
+  "pytest-mock",
+  "pytest-order",
+  "pytest-randomly",
+  "pytest-sftpserver",
+  "pytest-xdist",
+  "flaky",
+  "requests_mock",
+  "time_machine",
+  "freezegun",
+  "aioresponses",
+  "responses",
+]
+docs = [
+  "markdown>=3.5.2",
+  "mike>=2.0.0",
+  "mkdocs>=1.5.3",
+  "mkdocs-click>=0.8.0",
+  "mkdocs-gen-files>=0.5.0",
+  "mkdocs-git-revision-date-localized-plugin>=1.2.2",
+  "mkdocs-glightbox>=0.3.4",
+  "mkdocs-include-markdown-plugin>=6.0.4",
+  "mkdocs-literate-nav>=0.6.0",
+  "mkdocs-material>=9.5.13",
+  "mkdocs-material-extensions>=1.3.1",
+  "mkdocs-redirects>=1.2.1",
+  "mkdocs-section-index>=0.3.8",
+  "mkdocstrings-python>=1.7.5",
+  "pygments>=2.17.2",
+  "pymdown-extensions>=10.7.0",
+  "black",
+]
+se = ["spark-expectations>=2.2.1,<2.3.0"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+
+###  ~~~~~~~~~~~~~~~  ###
+#  Hatch Configuration  #
+###  ~~~~~~~~~~~~~~~  ###
+#
+
+[tool.hatch.version]
+description = """
+The version of the package is dynamically set and is maintained in the top-level `__init__.py` file of the package.
+---
+Bump by running `hatch version` with one of the following release types:
+- `major`                     - breaking changes, i.e. 2.0.0
+- `minor`                     - new features, i.e. 1.1.0
+- `micro` `fix` or `patch`    - bug fixes, i.e. 1.0.1
+- `a` or `alpha`              - alpha release, i.e. 1.0.0a1
+- `b` or `beta`               - beta release, i.e. 1.0.0b1
+- `c` `rc` `pre` or `preview` - release candidate, i.e. 1.0.0rc1
+- `r` `rev` or `post`         - post release, i.e. 1.0.0.post1
+- `dev`                       - development release, i.e. 1.0.0.dev1
+"""
+path = "src/koheesio/__about__.py"
+
+#[tool.hatch.envs.hatch-static-analysis.scripts]
+##TODO: move scripts from linting and style here
+#format-check = "black --check --diff ."
+#format-fix = "black ."
+#lint-check = "ruff check ."
+#lint-fix = "echo 'No formatting is required for this project.'"
+
+[tool.hatch.envs.default]
+description = """
+The default environment is used for development and general use.
+---
+We use the `uv` installer by default. This is a superfast, Rust-based installer.
+Run `hatch run` to run scripts in the default environment.
+
+# Code Quality
+To check and format the codebase, we use:
+ - `ruff` for linting, formtting and sorting imports
+ - `mypy` for static type checking.
+ - `pylint` for code quality checks.
+---
+There are several ways to run style checks and formatting:
+- `hatch run black-check` will check the codebase with black without applying fixes.
+- `hatch run black-fmt` will format the codebase using black.
+- `hatch run ruff-check` will check the codebase with ruff without applying fixes.
+- `hatch run ruff-fmt` will format the codebase using ruff.
+- `hatch run mypy-check` will check the codebase with mypy.
+- `hatch run pylint-check` will check the codebase with pylint.
+- `hatch run check` will run all the above checks (including pylint and mypy).
+- `hatch run fmt` or `hatch run fix` will format the codebase using ruff.
+- `hatch run lint` will run ruff, mypy, and pylint.
+
+# Testing and Coverage
+To run the test suite, use:
+- `hatch run all-tests` to run the full test suite.
+- `hatch run spark-tests` to run the Spark test suite.
+- `hatch run log-versions` to log the Python and PySpark versions.
+- `hatch run coverage` or `hatch run cov` to run the test suite with coverage.
+
+Note: the full test suite is will run all tests in all specified Python and PySpark versions. If you want to run tests
+against specific versions, you can add `+py=3.10` or `+version=pyspark34` to the command (replace the versions with the
+desired ones).
+
+For lighter / faster testing, use the `dev` environment with `hatch shell dev` and run the tests with `pytest` or use
+the `all-tests` or `spark-tests` command.
+"""
+installer = "uv"
+features = [
+  "async",
+  "async_http",
+  "pandas",
+  "pyspark",
+  "sftp",
+  "delta",
+  "excel",
+  "se",
+  "box",
+  "snowflake",
+  "tableau",
+  "dev",
+]
+
+
+[tool.hatch.envs.default.scripts]
+# TODO: add scripts section based on Makefile
+# TODO: add bandit
+# Code Quality commands
+ruff-fmt = "ruff format --check --diff ."
+ruff-fmt-fix = "ruff format ."
+ruff-check = "ruff check . --diff"
+ruff-check-fix = "ruff check . --fix"
+mypy-check = "mypy src"
+pylint-check = "pylint --output-format=colorized -d W0511 src"
+check = ["- ruff-fmt", "- ruff-check", "- mypy-check", "- pylint-check"]
+fmt = ["ruff-fmt-fix", "ruff-check-fix"]
+fix = "fmt"
+lint = ["- ruff-fmt", "- mypy-check", "pylint-check"]
+log-versions = "python --version && {env:HATCH_UV} pip freeze | grep pyspark"
+test = "- pytest{env:HATCH_TEST_ARGS:} {args} -n 2"
+spark-tests = "test -m spark"
+spark-remote-tests = "test -m spark -m \"not skip_on_remote_session\""
+non-spark-tests = "test -m \"not spark\""
+
+# scripts.run = "echo bla {env:HATCH_TEST_ARGS:} {args}"
+# scripts.run = "- log-versions && pytest tests/ {env:HATCH_TEST_ARGS:} {args}"
+# run ="echo {args}"
+# run = "- pytest tests/ {env:HATCH_TEST_ARGS:} {args}"
+# log-versions = "python --version && {env:HATCH_UV} pip freeze | grep pyspark"
+
+
+###  ~~~~~~~~~~~~~~~~~~~~~  ###
+#  Unit Testing and Coverage  #
+###  ~~~~~~~~~~~~~~~~~~~~~  ###
+#
+[tool.hatch.envs.hatch-test]
+description = """
+The test environment is used to run the test suite.
+---
+- Run `hatch run test:all-tests` to run the full test suite.
+- Run `hatch run test:spark-tests` to run the Spark test suite.
+- Run `hatch run test:log-versions` to log the Python and PySpark versions.
+- You can test against specific Python and PySpark versions by adding `+py=3.10` or `+version=pyspark34` to the command
+  (replace the versions with the desired ones).
+
+Note: Test env will run against all specified python and pyspark versions. Use the `dev` environment for development
+and general use.
+"""
+features = [
+  "async",
+  "async_http",
+  "box",
+  "delta",
+  "dev",
+  "excel",
+  "pandas",
+  "pyspark",
+  "se",
+  "sftp",
+  "snowflake",
+  "tableau",
+  "test",
+]
+
+parallel = true
+retries = 2
+retry-delay = 3
+
+[tool.hatch.envs.hatch-test.scripts]
+run = "pytest{env:HATCH_TEST_ARGS:} {args}"
+run-cov = "coverage run -m pytest{env:HATCH_TEST_ARGS:} {args}"
+cov-combine = "coverage combine"
+cov-report = "coverage report"
+
+
+[[tool.hatch.envs.hatch-test.matrix]]
+python = ["3.10"]
+version = ["pyspark33", "pyspark34", "pyspark35", "pyspark35r"]
+
+[[tool.hatch.envs.hatch-test.matrix]]
+python = ["3.11", "3.12"]
+version = ["pyspark35", "pyspark35r"]
+
+[[tool.hatch.envs.hatch-test.matrix]]
+# Follow Databricks 16.4 LTS: https://docs.databricks.com/aws/en/release-notes/runtime/16.4lts#system-environment
+python = ["3.12"]
+version = ["pyspark352", "pyspark352r"]
+
+[tool.hatch.envs.hatch-test.overrides]
+matrix.version.extra-dependencies = [
+  { value = "pyspark>=3.3,<3.4", if = ["pyspark33"] },
+  { value = "spark-expectations>=2.1.0", if = ["pyspark33"] },
+  { value = "pandas<2", if = ["pyspark33"] },
+  { value = "delta-spark>=2.2,<3.0", if = ["pyspark33"] },
+  { value = "pyspark>=3.4,<3.5", if = ["pyspark34"] },
+  { value = "spark-expectations>=2.1.0", if = ["pyspark34"] },
+  { value = "delta-spark>=2.2,<3.0", if = ["pyspark34"] },
+  # FIXME: Delta with PySpark 3.5.6 has a bug with overwrite: 
+  # https://github.com/delta-io/delta/issues/4671
+  { value = "pyspark>=3.5,<3.5.6", if = ["pyspark35"] },
+  { value = "pyspark[connect]>=3.5,<3.5.6", if = ["pyspark35r"] },
+  { value = "delta-spark>=3.0", if = ["pyspark35", "pyspark35r"] },
+  { value = "pyspark==3.5.2", if = ["pyspark352"] },
+  { value = "pyspark[connect]==3.5.2", if = ["pyspark352r"] },
+  { value = "delta-spark>=3.0", if = ["pyspark352", "pyspark352r"] },
+  # pyspark<4.0 needs pandas<2.2 (private `_builtin_table` import). pyspark33
+  # already has the stricter `pandas<2` above, so it doesn't need this entry.
+  { value = "pandas<2.2", if = ["pyspark34", "pyspark35", "pyspark35r", "pyspark352", "pyspark352r"] },
+]
+
+name.".*".env-vars = [
+  # set number of workes for parallel testing
+  { key = "PYTEST_XDIST_AUTO_NUM_WORKERS", value = "2" },
+  # disables Koheesio logo being printed during testing
+  { key = "KOHEESIO__PRINT_LOGO", value = "False" },
+]
+
+name.".*(pyspark35r).*".env-vars = [
+  # enable soark connect, setting to local as it will trigger 
+  # spark to start local spark server and enbale remote session
+  { key = "SPARK_REMOTE", value = "local" },
+  { key = "SPARK_TESTING", value = "True" },
+]
+
+
+[tool.pytest.ini_options]
+addopts = "-vv --color=yes --order-scope=module"
+log_level = "CRITICAL"
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "default: added to all tests by default if no other marker expect of standard pytest markers is present",
+  "spark: mark a test as a Spark test",
+  # "sftp: mark a test as an SFTP test",
+  # "se: mark a test as a Spark Expectations test",
+  # "box: mark a test as a Box test",
+  # "asyncio: mark a test as an asyncio test",
+  # "asyncio_http: mark a test as an asyncio HTTP test",
+]
+filterwarnings = [
+  # pyspark.pandas warnings
+  "ignore:distutils.*:DeprecationWarning:pyspark.pandas.*",
+  "ignore:'PYARROW_IGNORE_TIMEZONE'.*:UserWarning:pyspark.pandas.*",
+  # pydantic warnings
+  "ignore:A custom validator is returning a value other than `self`.*.*:UserWarning:pydantic.main.*",
+  "ignore:<module 'datetime' from .*.*:UserWarning:pydantic._internal.*",
+  # pyspark.sql.connect warnings
+  "ignore:is_datetime64tz_dtype.*:DeprecationWarning:pyspark.sql.connect.*",
+  "ignore:distutils.*:DeprecationWarning:pyspark.sql.connect.*",
+  # pyspark.sql.pandas warnings
+  "ignore:distutils.*:DeprecationWarning:pyspark.sql.pandas.*",
+  "ignore:is_datetime64tz_dtype.*:DeprecationWarning:pyspark.sql.pandas.*",
+  "ignore:is_categorical_dtype.*:DeprecationWarning:pyspark.sql.pandas.*",
+  "ignore:iteritems.*:FutureWarning:pyspark.sql.pandas.*",
+  # Koheesio warnings
+  "ignore:DayTimeIntervalType.*:UserWarning:koheesio.spark.snowflake.*",
+]
+
+[tool.coverage.run]
+source_pkgs = ["koheesio", "tests"]
+branch = true
+parallel = true
+omit = ["src/koheesio/__about__.py", "src/koheesio/__init__.py"]
+
+[tool.coverage.paths]
+koheesio = ["src/koheesio", "*/koheesio/src/koheesio"]
+tests = ["tests", "*/koheesio/tests"]
+
+[tool.coverage.report]
+exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
+omit = ["tests/*"]
+
+###  ~~~~  ###
+#  Docsite   #
+###  ~~~~  ###
+#
+[tool.hatch.envs.docs]
+description = """
+The docs environment is used to build the documentation.
+---
+Run `hatch run docs:build` to build the documentation and `hatch run docs:serve` to serve it.
+"""
+# TODO: take commands from Makefile
+detached = true
+features = ["docs"]
+scripts.build = ["mkdocs build"]
+scripts.serve = ["mkdocs serve --watch ./docs/"]
+
+
+###  ~~~~~~~~~~~~~~~~~~~~  ###
+#  Development Environment   #
+###  ~~~~~~~~~~~~~~~~~~~~  ###
+#
+[tool.hatch.envs.dev]
+description = """
+The dev environment has all the tools needed for development.
+
+'dev' sets the default python version to 3.10 and pyspark to 3.4.
+It installs in the .venv directory by default.
+Point your IDE to this environment for development.
+---
+You can run `hatch env dev:...` to run scripts in the environment.
+Activate the environment with `hatch shell dev`.
+
+Available scripts:
+- `black-check` - check the codebase with black without applying fixes.
+- `black-fmt` - format the codebase using black.
+- `isort-check` - check the codebase with isort without applying fixes.
+- `isort-fmt` - format the codebase using isort.
+- `ruff-check` - check the codebase with ruff without applying fixes.
+- `ruff-fmt` - format the codebase using ruff.
+- `mypy-check` - check the codebase with mypy.
+- `pylint-check` - check the codebase with pylint.
+- `check` - run all the above checks (including pylint and mypy).
+- `fmt` or `fix` - format the codebase using black, isort, and ruff.
+- `lint` - run ruff, mypy, and pylint.
+- `log-versions` - log the Python and PySpark versions.
+- `all-tests` - run the full test suite.
+- `spark-tests` - run the Spark test suite.
+- `coverage` or `cov` - run the test suite with coverage.
+"""
+path = ".venv"
+python = "3.12"
+template = "default"
+features = [
+  "async",
+  "async_http",
+  "box",
+  "pandas",
+  "pyspark",
+  "se",
+  "sftp",
+  "snowflake",
+  "delta",
+  "excel",
+  "tableau",
+  "dev",
+  "test",
+  "docs",
+]
+extra-dependencies = [
+  "pyspark[connect]==3.5.4",
+  # pyspark<4.0 imports `pandas.core.common._builtin_table` (removed in
+  # pandas 2.2.0). Drop alongside the pyspark pin once we upgrade.
+  "pandas<2.2",
+]
+
+# Enable this if you want Spark Connect in your dev environment
+[tool.hatch.envs.dev.env-vars]
+SPARK_REMOTE = "local"
+SPARK_TESTING = "True"
+
+
+###  ~~~~~~~~~~~~~~~~~~  ###
+#  Code Quality and Style  #
+###  ~~~~~~~~~~~~~~~~~~  ###
+#
+
+[tool.ruff]
+# https://docs.astral.sh/ruff/configuration/#using-pyprojecttoml
+# https://docs.astral.sh/ruff/settings/
+target-version = "py310"
+line-length = 120 # Same as Black.
+exclude = [
+  # Exclude a variety of commonly ignored directories.
+  ".bzr",
+  ".direnv",
+  ".eggs",
+  ".git",
+  ".hg",
+  ".mypy_cache",
+  ".pants.d",
+  ".pytype",
+  ".ruff_cache",
+  ".svn",
+  ".venv",
+  ".venvs",
+  "__pypackages__",
+  "__notebooks__",
+  "__research__",
+  "_build",
+  "buck-out",
+  "build",
+  "dist",
+  "node_modules",
+  "venv",
+]
+
+[tool.ruff.format]
+# https://docs.astral.sh/ruff/formatter/#docstring-formatting
+docstring-code-format = true
+docstring-code-line-length = 70
+
+[tool.ruff.lint]
+select = [
+  ## pycodestyle
+  "E",
+  ## Pyflakes
+  "F",
+  ## flake8-bugbear
+  # "B",
+  ## flake8-annotations
+  # "ANN",
+  ## pyupgrade
+  # "UP",
+  ## flake8-simplify
+  # "SIM",
+  ## pep8-naming
+  # "N",
+  ## isort
+  "I",
+]
+ignore = [
+  "F405", # To avoid errors like '`ConfigDict` may be undefined, or defined from star imports: `pydantic`'
+  "E501", # To avoid errors like 'line too long (120 > 79 characters)' -> let Black handle this instead
+  "F401", # To avoid errors like 'module imported but unused' -> there are too many false positives
+  "F403", # To avoid errors like 'import * used; unable to detect undefined names' -> leads to false positives
+]
+# Unlike Flake8, default to a complexity level of 10.
+mccabe.max-complexity = 10
+# Allow autofix for all enabled rules (when `--fix` is provided).
+fixable = [
+  "A",
+  "B",
+  "C",
+  "D",
+  "E",
+  "F",
+  "G",
+  "I",
+  "N",
+  "Q",
+  "S",
+  "T",
+  "W",
+  "ANN",
+  "ARG",
+  "BLE",
+  "COM",
+  "DJ",
+  "DTZ",
+  "EM",
+  "ERA",
+  "EXE",
+  "FBT",
+  "ICN",
+  "INP",
+  "ISC",
+  "NPY",
+  "PD",
+  "PGH",
+  "PIE",
+  "PL",
+  "PT",
+  "PTH",
+  "PYI",
+  "RET",
+  "RSE",
+  "RUF",
+  "SIM",
+  "SLF",
+  "TCH",
+  "TID",
+  "TRY",
+  "UP",
+  "YTT",
+]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.isort]
+force-to-top = ["__future__", "typing"]
+section-order = [
+  "future",
+  "standard-library",
+  "third-party",
+  "pydantic",
+  "pyspark",
+  "first-party",
+  "local-folder",
+]
+sections.pydantic = ["pydantic"]
+sections.pyspark = ["pyspark"]
+detect-same-package = true
+force-sort-within-sections = true
+
+[tool.mypy]
+python_version = "3.10"
+files = ["koheesio/**/*.py"]
+plugins = ["pydantic.mypy"]
+pretty = true
+warn_unused_configs = true
+check_untyped_defs = false
+disallow_untyped_calls = false
+disallow_untyped_defs = true
+warn_no_return = false
+implicit_optional = true
+allow_untyped_globals = true
+disable_error_code = ["attr-defined", "return-value", "union-attr", "override"]
+
+[tool.pylint.main]
+fail-under = 9.5
+py-version = "3.10"
+
+[tool.pylint.basic]
+# require docstrings for all functions except magic methods (those starting and ending with __) and test methods (those starting with test_).
+no-docstring-rgx = "__.*__|test_.*"
+
+[tool.pylint.classes]
+exclude-protected = [
+  "_asdict",
+  "_fields",
+  "_replace",
+  "_source",
+  "_make",
+  "os._exit",
+  "_jsc",
+]
+
+[tool.pylint.design]
+max-attributes = 25
+max-bool-expr = 5
+max-locals = 16
+max-parents = 25
+min-public-methods = 1
+
+[tool.pylint.format]
+# Same as Black.
+max-line-length = 120
+# Maximum number of lines in a module.
+max-module-lines = 1200
+# Allow the body of a class to be on the same line as the declaration if body contains single statement.
+single-line-class-stmt = true
+# Allow the body of an if to be on the same line as the test if there is no else.
+single-line-if-stmt = true
+
+[tool.pylint.logging]
+# The type of string formatting that logging methods do. old means using % formatting, new is for {} formatting.
+logging-format-style = "new"
+
+[tool.pylint."messages control"]
+confidence = [
+  "HIGH",
+  "CONTROL_FLOW",
+  "INFERENCE",
+  "INFERENCE_FAILURE",
+  "UNDEFINED",
+]
+disable = [
+  "raw-checker-failed",
+  "bad-inline-option",
+  "locally-disabled",
+  "file-ignored",
+  "suppressed-message",
+  "useless-suppression",
+  "deprecated-pragma",
+  "use-symbolic-message-instead",
+  "use-implicit-booleaness-not-comparison-to-string",
+  "use-implicit-booleaness-not-comparison-to-zero",
+  "no-member",
+  "arguments-differ",
+  "consider-using-set-comprehension",
+  "duplicate-code",
+  "import-outside-toplevel",
+  "inconsistent-return-statements",
+  "invalid-name",
+  "line-too-long",
+  "logging-fstring-interpolation",
+  "no-else-return",
+  "no-self-argument",
+  "protected-access",
+  "too-few-public-methods",
+  "too-many-arguments",
+  "too-many-branches",
+  "too-many-instance-attributes",
+  "too-many-statements",
+  "useless-object-inheritance",
+  "unnecessary-ellipsis",
+]
+enable = ["logging-not-lazy", "c-extension-no-member"]
+
+[tool.pylint.miscellaneous]
+notes = ["FIXME", "TODO"]
+
+[tool.pylint.refactoring]
+max-nested-blocks = 3

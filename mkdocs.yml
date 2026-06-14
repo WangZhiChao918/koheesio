@@ -1,0 +1,212 @@
+site_name: Koheesio
+site_url: https://engineering.nike.com/koheesio/
+site_description:
+  Koheesio is an open source python library that simplifies the development of data engineering pipelines.
+
+repo_name: Nike-Inc/koheesio
+repo_url: https://github.com/Nike-Inc/koheesio
+
+use_directory_urls: false
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+
+watch:
+  - src/koheesio
+
+extra:
+  version:
+    provider: mike
+    default: main
+  social:
+    - icon: material/github
+      link: https://github.com/Nike-Inc/koheesio.git
+    - icon: material/bulletin-board
+      link: https://github.com/orgs/Nike-Inc/projects/4
+
+nav:
+  - Home: index.md
+  - Tutorials and How-To:  # tutorials folder
+    - Onboarding: tutorials/onboarding.md
+#    - How-To Guides:
+#      - tutorials/how-to.md
+    - Getting Started:
+      - Installation: tutorials/getting-started.md
+      - Learn Koheesio: tutorials/learn-koheesio.md
+      - Hello World: tutorials/hello-world.md
+    - Advanced Topics:
+      - Data Processing: tutorials/advanced-data-processing.md
+      - Testing Steps: tutorials/testing-koheesio-steps.md
+  - Reference:  # reference folder
+    - Concepts:
+      - reference/concepts/concepts.md
+      - Steps: reference/concepts/step.md
+      - Context: reference/concepts/context.md
+      - Logger: reference/concepts/logger.md
+      - Spark:
+        - Readers: reference/spark/readers.md
+        - Writers: reference/spark/writers.md
+        - Transformations: reference/spark/transformations.md
+    - Glossary:
+      - includes/glossary.md
+  - API Reference: api_reference/
+  - Community:  # community folder
+    - Contribute: community/contribute.md
+    - Approach to Documentation: community/approach-documentation.md
+  - Release Notes: 
+    - Release 0.11 (dev): releases/0.11.md
+    - Release 0.10 (latest): releases/0.10.md
+    - Release 0.9: releases/0.9.md
+    # - Release 0.8: releases/0.8.md
+    # - Release 0.7: releases/0.7.md
+
+theme:
+  name: material
+  font:
+    text: Roboto
+    code: Roboto Mono
+  favicon: assets/logo_koheesio.svg
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+  features:
+    # - announce.dismiss
+    - content.code.annotate
+    - content.code.copy
+    - content.tabs.link
+    - content.tooltips
+    # - navigation.footer
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    # - navigation.expand
+    # - navigation.indexes  # do not confuse with section-index plugin
+    # - navigation.instant
+    # - navigation.path
+    # - navigation.prune
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+    # - toc.integrate
+  logo: assets/logo_total_white.svg
+  language: en
+
+extra_css:
+  - css/custom.css
+
+plugins:
+  - gen-files:
+      scripts:
+        - docs/gen_ref_nav.py
+  - mike # https://github.com/jimporter/mike
+  - git-revision-date-localized  # https://github.com/timvink/mkdocs-git-revision-date-localized-plugin
+      # exclude:
+  - include-markdown:  # https://github.com/mondeja/mkdocs-include-markdown-plugin
+      opening_tag: "{%"
+      closing_tag: "%}"
+      rewrite_relative_urls: true
+      heading_offset: 1
+      # start: <!--start-->
+      # end: <!--end-->
+  - search:
+      lang: en
+  - tags:
+      tags_file: misc/tags.md
+  - literate-nav:
+      nav_file: API.md
+  - section-index  # https://github.com/oprypin/mkdocs-section-index
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - src
+          options:
+            # Headings
+            show_root_heading: true
+            show_root_full_path: false
+            # Docstrings
+            docstring_style: numpy
+            docstring_options:
+              ignore_init_summary: true
+            # docstring_section_style: spacy
+            show_if_no_docstring: true
+            # Signatures/annotations
+            show_signature_annotations: true
+            # Other
+            show_bases: false
+            merge_init_into_class: true
+            filters: ["!^_"]
+            separate_signature: true
+            signature_crossrefs: true
+            show_docstring_attributes: true
+            show_category_heading: false
+            show_root_full_path: true
+            show_root_heading: false
+            show_root_members_full_path: true
+            show_root_toc_entry: false
+            show_signature_annotations: true
+            show_source: true
+            warn_unknown_params: false
+          import:
+            - https://docs.python.org/3/objects.inv
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - mkdocs-click
+  - attr_list  # https://squidfunk.github.io/mkdocs-material/reference/images
+  - def_list  # https://squidfunk.github.io/mkdocs-material/setup/extensions/python-markdown/#definition-lists
+  - footnotes
+  - md_in_html
+  - tables  # https://squidfunk.github.io/mkdocs-material/reference/data-tables/
+  - toc:
+      permalink: "#"
+      toc_depth: 4
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:  # https://squidfunk.github.io/mkdocs-material/reference/icons-emojis/
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.magiclink:
+      repo_url_shorthand: true
+      user: squidfunk
+      repo: mkdocs-material
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
