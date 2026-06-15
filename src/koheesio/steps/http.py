@@ -525,6 +525,14 @@ class PaginatedHttpGetStep(HttpGetStep):
 
         return basic_url.format(**url_params)
 
+    class Output(HttpGetStep.Output):
+        """Output class for PaginatedHttpGetStep"""
+
+        pages_metadata: Optional[List[Dict[str, Any]]] = Field(
+            default=None,
+            description="Per-page metadata including request URL, HTTP status code, page number, and offset",
+        )
+
     def execute(self) -> None:
         """
         Executes the HTTP GET request and handles pagination.
@@ -537,6 +545,7 @@ class PaginatedHttpGetStep(HttpGetStep):
         # Set up pagination parameters
         offset, pages = (self.offset, self.pages + 1) if self.paginate else (1, 1)  # type: ignore
         data = []
+        pages_metadata: List[Dict[str, Any]] = []
         _basic_url = self.url
 
         for page in range(offset, pages):  # type: ignore[arg-type]
@@ -546,6 +555,14 @@ class PaginatedHttpGetStep(HttpGetStep):
             self.url = self._url(basic_url=_basic_url, page=page)
 
             with self._request() as response:
+                pages_metadata.append(
+                    {
+                        "request_url": self.url,
+                        "status_code": response.status_code,
+                        "page": page if self.paginate else None,
+                        "offset": self.offset if self.paginate else None,
+                    }
+                )
                 if isinstance(response_json := response.json(), list):
                     data += response_json
                 else:
@@ -556,3 +573,4 @@ class PaginatedHttpGetStep(HttpGetStep):
         self.output.response_raw = None
         self.output.raw_payload = None
         self.output.status_code = None
+        self.output.pages_metadata = pages_metadata

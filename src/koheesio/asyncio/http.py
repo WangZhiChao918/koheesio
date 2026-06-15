@@ -118,6 +118,10 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
         responses_urls: Optional[List[Tuple[Dict[str, Any], yarl.URL]]] = Field(
             default=None, description="List of responses from the API and request URL", repr=False
         )
+        responses_metadata: Optional[List[Dict[str, Any]]] = Field(
+            default=None,
+            description="Per-response metadata including request URL and HTTP status code",
+        )
 
     def __tasks_generator(self, method: HttpMethod) -> List[asyncio.Task]:
         """
@@ -158,7 +162,7 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
         """
         return self
 
-    async def _execute(self, tasks: List[asyncio.Task]) -> List[Tuple[Dict[str, Any], yarl.URL]]:
+    async def _execute(self, tasks: List[asyncio.Task]) -> List[Tuple[Dict[str, Any], yarl.URL, int]]:
         """
         Execute the HTTP requests asynchronously.
 
@@ -169,18 +173,25 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
 
         Returns
         -------
-        List[Tuple[Dict[str, Any], yarl.URL]]
-            A list of response data and corresponding request URLs.
+        List[Tuple[Dict[str, Any], yarl.URL, int]]
+            A list of (response data, request URL, HTTP status code) tuples.
         """
         self._init_session()
+        self.output.responses_metadata = []
         try:
-            responses_urls = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks)
         finally:
             if self.client_session:
                 await self.client_session.close()
             await self.__retry_client.close()
 
-        return responses_urls
+        # Build metadata list from results (including status codes)
+        for _, url, status in results:
+            self.output.responses_metadata.append(
+                {"request_url": str(url), "status_code": status}
+            )
+
+        return results
 
     def _init_session(self) -> None:
         """
@@ -259,7 +270,7 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
         method: HttpMethod,
         url: yarl.URL,
         **kwargs,
-    ) -> Tuple[Dict[str, Any], yarl.URL]:
+    ) -> Tuple[Dict[str, Any], yarl.URL, int]:
         """
         Make an HTTP request.
 
@@ -274,13 +285,14 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
 
         Returns
         -------
-        Tuple[Dict[str, Any], yarl.URL]
-            A tuple containing the response data and the request URL.
+        Tuple[Dict[str, Any], yarl.URL, int]
+            A tuple containing the response data, the request URL, and the HTTP status code.
         """
         async with self.__retry_client.request(method=method, url=url, **kwargs) as response:
             res = await response.json()
+            status = response.status
 
-        return res, response.request_info.url
+        return res, response.request_info.url, status
 
     # Disable pylint warning: method was expected to be 'non-async'
     # pylint: disable=W0236
@@ -295,9 +307,9 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
             A list of response data and corresponding request URLs.
         """
         tasks = self.__tasks_generator(method=HttpMethod.GET)
-        responses_urls = await self._execute(tasks=tasks)
+        results = await self._execute(tasks=tasks)
 
-        return responses_urls
+        return [(d, u) for d, u, _ in results]
 
     # Disable pylint warning: method was expected to be 'non-async'
     # pylint: disable=W0236
@@ -311,9 +323,9 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
             A list of response data and corresponding request URLs.
         """
         tasks = self.__tasks_generator(method=HttpMethod.POST)
-        responses_urls = await self._execute(tasks=tasks)
+        results = await self._execute(tasks=tasks)
 
-        return responses_urls
+        return [(d, u) for d, u, _ in results]
 
     # Disable pylint warning: method was expected to be 'non-async'
     # pylint: disable=W0236
@@ -327,9 +339,9 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
             A list of response data and corresponding request URLs.
         """
         tasks = self.__tasks_generator(method=HttpMethod.PUT)
-        responses_urls = await self._execute(tasks=tasks)
+        results = await self._execute(tasks=tasks)
 
-        return responses_urls
+        return [(d, u) for d, u, _ in results]
 
     # Disable pylint warning: method was expected to be 'non-async'
     # pylint: disable=W0236
@@ -343,9 +355,9 @@ class AsyncHttpStep(AsyncStep, ExtraParamsMixin):
             A list of response data and corresponding request URLs.
         """
         tasks = self.__tasks_generator(method=HttpMethod.DELETE)
-        responses_urls = await self._execute(tasks=tasks)
+        results = await self._execute(tasks=tasks)
 
-        return responses_urls
+        return [(d, u) for d, u, _ in results]
 
     def execute(self) -> None:
         """
