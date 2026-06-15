@@ -314,8 +314,15 @@ class Query(SnowflakeReader):
 
     @field_validator("query")
     def validate_query(cls, query: str) -> str:
-        """Replace escape characters"""
+        """Replace escape characters, strip whitespace, and ensure the query is not empty.
+
+        An empty/whitespace-only `query` is effectively a missing required parameter; raising here
+        (consistent with `RunQuery` and `SnowflakeRunQueryPython`) surfaces the configuration problem
+        at construction time instead of failing later inside the Spark reader.
+        """
         query = query.replace("\\n", "\n").replace("\\t", "\t").strip()
+        if not query:
+            raise ValueError("Query cannot be empty")
         return query
 
     def get_options(self, by_alias: bool = True, include: Set[str] = None) -> Dict[str, Any]:
@@ -740,6 +747,11 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
         target_df: Optional[DataFrame] = Field(
             default=None, description="The DataFrame that was written to the Snowflake target table"
         )
+        summary: Optional[str] = Field(
+            default=None,
+            description="Human-readable description of the completed synchronization "
+            "(source table, target table, synchronisation mode, and streaming flag)",
+        )
 
     @field_validator("staging_table_name")
     def _validate_staging_table(cls, staging_table_name: str) -> str:
@@ -1074,10 +1086,12 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
                 self.writer.await_termination()  # type: ignore
             self.drop_table(self.staging_table)
 
-        self.log.info(
+        summary = (
             f"Synchronized Delta source '{self.source_table.table_name}' to Snowflake target "
             f"'{self.target_table}' using '{self.synchronisation_mode.value}' mode (streaming={self.streaming})."
         )
+        self.output.summary = summary
+        self.log.info(summary)
 
 
 class TagSnowflakeQuery(Step, ExtraParamsMixin):

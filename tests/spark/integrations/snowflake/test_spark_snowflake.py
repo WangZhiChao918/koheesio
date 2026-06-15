@@ -98,6 +98,12 @@ class TestQuery:
         k = Query(**self.options).execute()
         assert k.df.count() == 3
 
+    @pytest.mark.parametrize("bad_query", ["", "   ", "\t"])
+    def test_empty_query_raises(self, bad_query, spark):
+        """An empty/whitespace-only query is effectively a missing parameter and must fail at config time."""
+        with pytest.raises(pydantic.ValidationError):
+            Query(**{**self.options, "query": bad_query})
+
 
 class TestTableQuery:
     options = {"table": "table", **COMMON_OPTIONS}

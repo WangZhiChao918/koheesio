@@ -92,6 +92,41 @@ class TestSnowflakeSyncTask:
         assertDataFrameEqual(task.output.target_df, df)
 
     @mock.patch.object(SynchronizeDeltaToSnowflakeTask, "writer")
+    def test_summary(self, mock_writer, spark):
+        """A successful sync should populate output.summary with a clear description of what ran."""
+        source_table = DeltaTableStep(datbase="klettern", table="test_overwrite")
+
+        df = spark.createDataFrame(
+            data=[
+                ("Australia", 100, 3000),
+                ("USA", 10000, 20000),
+                ("UK", 7000, 10000),
+            ],
+            schema=[
+                "Country",
+                "NumVaccinated",
+                "AvailableDoses",
+            ],
+        )
+
+        DeltaTableWriter(table=source_table, output_mode=BatchOutputMode.OVERWRITE, df=df).execute()
+
+        task = SynchronizeDeltaToSnowflakeTask(
+            streaming=False,
+            synchronisation_mode=BatchOutputMode.OVERWRITE,
+            **{**COMMON_OPTIONS, "source_table": source_table},
+        )
+
+        with mock.patch.object(SynchronizeDeltaToSnowflakeTask, "drop_table"):
+            task.execute()
+
+        # Success path stays compatible (target_df is still populated) and now also explains itself.
+        assertDataFrameEqual(task.output.target_df, df)
+        assert task.output.summary is not None
+        assert "foo.bar" in task.output.summary
+        assert "overwrite" in task.output.summary.lower()
+
+    @mock.patch.object(SynchronizeDeltaToSnowflakeTask, "writer")
     def test_overwrite_with_persist(self, mock_writer, spark):
         source_table = DeltaTableStep(datbase="klettern", table="test_overwrite")
 
