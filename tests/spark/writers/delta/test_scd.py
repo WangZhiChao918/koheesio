@@ -447,3 +447,80 @@ def test_scd2_logic(spark):
             )
 
             assert res == expected
+
+
+def test_scd2_summary(spark):
+    """The optional summary is computed end-to-end and exposed on ``writer.output.summary``."""
+    from koheesio.spark.utils.connect import is_remote_session
+
+    spark.sql(
+        """CREATE OR REPLACE TABLE scd2_summary_test_set (
+                merge_key STRING NOT NULL,
+                value_scd2 STRING NOT NULL,
+                value_scd1 STRING NOT NULL,
+                _scd2 STRUCT<effective_time: TIMESTAMP, end_time: TIMESTAMP, is_current: BOOLEAN>
+                )
+                USING delta"""
+    )
+
+    writer = SCD2DeltaTableWriter(
+        table=DeltaTableStep(table="scd2_summary_test_set"),
+        scd2_timestamp_col=F.col("run_date"),
+        exclude_columns=["run_date"],
+        merge_key="merge_key",
+        scd2_columns=["value_scd2"],
+        scd1_columns=["value_scd1"],
+        log_summary=True,
+    )
+
+    remote = 3.4 < SPARK_MINOR_VERSION < 4.0 and is_remote_session()
+
+    # Batch 1: two brand new dimension members -> two inserts, nothing updated or closed.
+    batch1 = spark.createDataFrame(
+        [("key1", "v1", "s1", "2024-05-01"), ("key2", "v2", "s2", "2024-05-01")],
+        ["merge_key", "value_scd2", "value_scd1", "run_date"],
+    ).withColumn("run_date", F.to_timestamp("run_date"))
+    writer.df = batch1
+
+    if remote:
+        with pytest.raises(SparkConnectDeltaTableException) as exc_info:
+            writer.execute()
+        assert str(exc_info.value).startswith("`DeltaTable.forName` is not supported due to delta calling _sc")
+    else:
+        writer.execute()
+        assert writer.output.summary == {
+            "new_records": 2,
+            "updated_records": 0,
+            "closed_records": 0,
+            "scd1_updates": 0,
+            "total_affected_records": 2,
+            "source_rows": 2,
+            "unchanged_records": 0,
+        }
+
+    # Batch 2: key1 SCD2 change (new version + closed history), key2 SCD1-only update, key3 new member.
+    batch2 = spark.createDataFrame(
+        [
+            ("key1", "v1_changed", "s1", "2024-05-02"),
+            ("key2", "v2", "s2_changed", "2024-05-02"),
+            ("key3", "v3", "s3", "2024-05-02"),
+        ],
+        ["merge_key", "value_scd2", "value_scd1", "run_date"],
+    ).withColumn("run_date", F.to_timestamp("run_date"))
+    writer.df = batch2
+
+    if remote:
+        with pytest.raises(SparkConnectDeltaTableException) as exc_info:
+            writer.execute()
+        assert str(exc_info.value).startswith("`DeltaTable.forName` is not supported due to delta calling _sc")
+    else:
+        writer.execute()
+        assert writer.output.summary == {
+            "new_records": 1,
+            "updated_records": 1,
+            "closed_records": 1,
+            "scd1_updates": 1,
+            "total_affected_records": 4,
+            "source_rows": 3,
+            "unchanged_records": 0,
+        }

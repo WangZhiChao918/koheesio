@@ -15,7 +15,7 @@ and seamless integration with Delta tables in Spark.
 
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from logging import Logger
 
 from delta.tables import DeltaMergeBuilder, DeltaTable
@@ -63,6 +63,10 @@ class SCD2DeltaTableWriter(Writer):
         End time col name.
     target_auto_generated_columns : List[str]
         Auto generated columns from target Delta table. Will be used to exclude from merge logic.
+    log_summary : bool
+        If True, compute a summary of the merge (counts of new, updated, closed and SCD1 records),
+        expose it on ``Output.summary`` and log it. Default is False, which keeps the writer's
+        behavior and performance unchanged.
     """
 
     table: InstanceOf[DeltaTableStep] = Field(..., description="The table to merge to")
@@ -87,6 +91,20 @@ class SCD2DeltaTableWriter(Writer):
         default_factory=list,
         description="Auto generated columns from target Delta table. Will be used to exclude from merge logic",
     )
+    log_summary: bool = Field(
+        default=False,
+        description="If True, compute a per-merge summary (new/updated/closed/SCD1 record counts), expose it on "
+        "Output.summary and log it. Default False keeps the existing write behavior and performance.",
+    )
+
+    class Output(Writer.Output):
+        """Output of the SCD2DeltaTableWriter."""
+
+        summary: Optional[Dict[str, int]] = Field(
+            default=None,
+            description="Summary of the merge when log_summary=True; counts of affected records keyed by category. "
+            "None when log_summary is False.",
+        )
 
     @staticmethod
     def _prepare_attr_clause(attrs: List[str], src_alias: str, dest_alias: str) -> Optional[str]:
@@ -460,6 +478,101 @@ class SCD2DeltaTableWriter(Writer):
 
         return merge_builder
 
+    @staticmethod
+    def _summarize_merge_actions(
+        action_counts: List[Tuple[Optional[str], Optional[int], int]],
+        source_rows: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """
+        Aggregate ``(merge_action, row_number, count)`` triples into an SCD2 change summary.
+
+        The SCD2 staging step tags every row that needs to be written with a
+        ``__meta_scd2_system_merge_action`` and a ``__meta_scd2_rn`` (1 or 2):
+
+        - ``'I'``  : a brand new dimension member, inserted as a current record (``rn`` is 1 only).
+        - ``'UC'`` : a tracked (SCD2) attribute change. ``rn`` 1 inserts the new current version,
+          ``rn`` 2 closes the previously current version (sets end_time / is_current to False).
+        - ``'U'``  : an SCD1-only change, applied in place to the current record (``rn`` is 1 only).
+
+        Rows whose tracked attributes did not change are filtered out before staging and therefore
+        do not appear in ``action_counts``.
+
+        This method is intentionally free of any Spark dependency so the field computation can be
+        unit-tested without a Spark/Delta runtime.
+
+        Parameters
+        ----------
+        action_counts : List[Tuple[Optional[str], Optional[int], int]]
+            Triples of ``(merge_action, row_number, count)``, typically the collected result of a
+            ``groupBy('__meta_scd2_system_merge_action', '__meta_scd2_rn').count()``.
+        source_rows : Optional[int]
+            Total number of rows in the source DataFrame. When provided, ``source_rows`` and
+            ``unchanged_records`` are added to the returned summary.
+
+        Returns
+        -------
+        Dict[str, int]
+            Summary with keys ``new_records``, ``updated_records``, ``closed_records``,
+            ``scd1_updates`` and ``total_affected_records`` (plus ``source_rows`` and
+            ``unchanged_records`` when ``source_rows`` is given).
+
+        """
+        new_records = updated_records = closed_records = scd1_updates = 0
+
+        for action, rn, count in action_counts:
+            if action == "I":
+                new_records += count
+            elif action == "U":
+                scd1_updates += count
+            elif action == "UC":
+                if rn == 2:
+                    closed_records += count
+                else:
+                    updated_records += count
+
+        summary = {
+            "new_records": new_records,
+            "updated_records": updated_records,
+            "closed_records": closed_records,
+            "scd1_updates": scd1_updates,
+            "total_affected_records": new_records + updated_records + closed_records + scd1_updates,
+        }
+
+        if source_rows is not None:
+            summary["source_rows"] = source_rows
+            summary["unchanged_records"] = source_rows - (new_records + updated_records + scd1_updates)
+
+        return summary
+
+    def _emit_summary(self, staged: DataFrame) -> Dict[str, int]:
+        """
+        Compute the merge summary from the staged DataFrame, store it on the output and log it.
+
+        Only invoked when ``log_summary`` is enabled. The ``staged`` DataFrame must still contain the
+        ``__meta_scd2_system_merge_action`` and ``__meta_scd2_rn`` metadata columns (i.e. it must be
+        captured before ``_add_scd2_columns`` drops them).
+
+        Parameters
+        ----------
+        staged : DataFrame
+            The staged DataFrame, including the SCD2 merge-action metadata columns.
+
+        Returns
+        -------
+        Dict[str, int]
+            The computed summary, as produced by :meth:`_summarize_merge_actions`.
+
+        """
+        action_counts = [
+            (row["__meta_scd2_system_merge_action"], row["__meta_scd2_rn"], row["count"])
+            for row in staged.groupBy("__meta_scd2_system_merge_action", "__meta_scd2_rn").count().collect()
+        ]
+        summary = self._summarize_merge_actions(action_counts, source_rows=self.df.count())
+        self.output.summary = summary
+        self.log.info(f"SCD2 merge summary for table '{self.table.table_name}': {summary}")
+
+        return summary
+
     def execute(self) -> None:
         """
         Execute the SCD Type 2 operation.
@@ -528,7 +641,10 @@ class SCD2DeltaTableWriter(Writer):
 
         system_merge_action += " ELSE NULL END"
 
-        # Prepare the staged DataFrame
+        # Prepare the staged DataFrame.
+        # The __meta_scd2_system_merge_action / __meta_scd2_rn metadata columns are still present at
+        # this point; they are required to compute the optional execution summary and are dropped by
+        # _add_scd2_columns just before the merge.
         staged = (
             self.df.withColumn(
                 "__meta_scd2_timestamp",
@@ -559,20 +675,33 @@ class SCD2DeltaTableWriter(Writer):
                 "__meta_scd2_effective_time",
                 self._scd2_effective_time(meta_scd2_effective_time_col=meta_scd2_effective_time_col),
             )
-            .transform(
-                func=self._add_scd2_columns,
-                meta_scd2_struct_col_name=self.meta_scd2_struct_col_name,
-                meta_scd2_effective_time_col_name=self.meta_scd2_effective_time_col_name,
-                meta_scd2_end_time_col_name=self.meta_scd2_end_time_col_name,
-                meta_scd2_is_current_col_name=self.meta_scd2_is_current_col_name,
-            )
         )
 
-        self._prepare_merge_builder(
-            delta_table=delta_table,
-            dest_alias=dest_alias,
-            staged=staged,
-            merge_key=self.merge_key,
-            columns_to_process=columns_to_process,
-            meta_scd2_effective_time_col=meta_scd2_effective_time_col,
-        ).execute()
+        staged_for_summary: Optional[DataFrame] = None
+        if self.log_summary:
+            # Cache so the summary aggregation and the merge share a single computation of the staged
+            # data rather than scanning the source twice.
+            staged = staged.cache()
+            staged_for_summary = staged
+            self._emit_summary(staged)
+
+        staged = staged.transform(
+            func=self._add_scd2_columns,
+            meta_scd2_struct_col_name=self.meta_scd2_struct_col_name,
+            meta_scd2_effective_time_col_name=self.meta_scd2_effective_time_col_name,
+            meta_scd2_end_time_col_name=self.meta_scd2_end_time_col_name,
+            meta_scd2_is_current_col_name=self.meta_scd2_is_current_col_name,
+        )
+
+        try:
+            self._prepare_merge_builder(
+                delta_table=delta_table,
+                dest_alias=dest_alias,
+                staged=staged,
+                merge_key=self.merge_key,
+                columns_to_process=columns_to_process,
+                meta_scd2_effective_time_col=meta_scd2_effective_time_col,
+            ).execute()
+        finally:
+            if staged_for_summary is not None:
+                staged_for_summary.unpersist()
