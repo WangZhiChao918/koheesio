@@ -220,7 +220,7 @@ class TestSnowflakeSyncTask:
             streaming=streaming,
             synchronisation_mode=output_mode,
             schema_tracking_location="/schema/tracking/location",
-            **{**COMMON_OPTIONS, "source_table": source_table},
+            **{**COMMON_OPTIONS, "source_table": source_table, "account": "sf_account"},
         )
 
         reader = task.reader
@@ -347,7 +347,7 @@ class TestMerge:
 
 
 class TestValidations:
-    options = {**COMMON_OPTIONS}
+    options = {**COMMON_OPTIONS, "account": "sf_account"}
 
     @pytest.fixture(autouse=True, scope="class")
     def set_spark(self, spark):
@@ -392,7 +392,7 @@ class TestValidations:
             SynchronizeDeltaToSnowflakeTask(
                 streaming=True,
                 synchronisation_mode=BatchOutputMode.MERGE,
-                **{**COMMON_OPTIONS, "key_columns": []},
+                **{**COMMON_OPTIONS, "key_columns": [], "account": "sf_account"},
             )
 
     @pytest.mark.parametrize(
@@ -435,7 +435,7 @@ class TestValidations:
         task = SynchronizeDeltaToSnowflakeTask(
             streaming=True,
             synchronisation_mode=BatchOutputMode.MERGE,
-            **{**COMMON_OPTIONS, "source_table": table},
+            **{**COMMON_OPTIONS, "source_table": table, "account": "sf_account"},
         )
         assert task.source_table.is_cdf_active is False
 
@@ -494,6 +494,7 @@ class TestMergeQuery:
             **{
                 **COMMON_OPTIONS,
                 "source_table": DeltaTableStep(database="klettern", table="sync_test_table"),
+                "account": "sf_account",
             },
         )
 
@@ -507,6 +508,7 @@ class TestMergeQuery:
             **{
                 **COMMON_OPTIONS,
                 "source_table": DeltaTableStep(database="klettern", table="sync_test_table"),
+                "account": "sf_account",
             },
         )
 
@@ -521,5 +523,119 @@ class TestMergeQuery:
                 **{
                     **COMMON_OPTIONS,
                     "source_table": DeltaTableStep(database="klettern", table="sync_test_table"),
+                    "account": "sf_account",
                 },
             )
+
+
+class TestEnhancedValidations:
+    """Tests for enhanced configuration validation on SynchronizeDeltaToSnowflakeTask and readers."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _set_spark(self, spark):
+        """Ensure Spark session is available for DeltaTableStep instantiation."""
+        yield spark
+
+    def test_merge_requires_account(self):
+        """MERGE mode must fail when 'account' is not provided."""
+        with pytest.raises(pydantic.ValidationError, match="account"):
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=True,
+                synchronisation_mode=BatchOutputMode.MERGE,
+                **{
+                    "source_table": DeltaTableStep(table="test_table"),
+                    **COMMON_OPTIONS,
+                },
+            )
+
+    @pytest.mark.parametrize(
+        "invalid_target_table",
+        ["just_a_table", "", None],
+    )
+    def test_invalid_target_table_format(self, invalid_target_table):
+        """target_table must be in 'schema.table' or 'database.schema.table' format."""
+        options = {**COMMON_OPTIONS, "target_table": invalid_target_table}
+        with pytest.raises(pydantic.ValidationError, match="target_table"):
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.OVERWRITE,
+                source_table=DeltaTableStep(table="test"),
+                **options,
+            )
+
+    def test_multiple_errors_reported_at_once(self):
+        """When multiple config issues exist, all are surfaced in a single ValidationError."""
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.MERGE,
+                source_table=DeltaTableStep(table="test"),
+                **{k: v for k, v in COMMON_OPTIONS.items() if k not in ("target_table", "key_columns")},
+                key_columns=[],
+                target_table="invalid_no_dot",
+            )
+
+        error_text = str(exc_info.value)
+        # All four issues should appear in the aggregated error
+        assert "MERGE mode requires streaming" in error_text
+        assert "key column" in error_text.lower()
+        assert "account" in error_text.lower()
+        assert "target_table" in error_text
+
+    def test_empty_query_rejected(self):
+        """Query with empty/whitespace-only query string must be rejected."""
+        from koheesio.integrations.spark.snowflake import Query
+
+        with pytest.raises(pydantic.ValidationError, match="empty"):
+            Query(
+                url="url",
+                user="user",
+                password="password",
+                database="db",
+                schema="schema",
+                role="role",
+                warehouse="warehouse",
+                query="   ",
+            )
+
+    def test_empty_dbtable_rejected(self):
+        """DbTableQuery with empty table name must be rejected."""
+        from koheesio.integrations.spark.snowflake import DbTableQuery
+
+        with pytest.raises(pydantic.ValidationError, match="empty"):
+            DbTableQuery(
+                url="url",
+                user="user",
+                password="password",
+                database="db",
+                schema="schema",
+                role="role",
+                warehouse="warehouse",
+                table="",
+            )
+
+    def test_enable_deletion_requires_merge_mode(self):
+        """enable_deletion=True must fail with non-MERGE modes."""
+        with pytest.raises(pydantic.ValidationError, match="enable_deletion"):
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.OVERWRITE,
+                enable_deletion=True,
+                source_table=DeltaTableStep(table="test"),
+                **COMMON_OPTIONS,
+            )
+
+    def test_persist_staging_warns_outside_merge(self, caplog):
+        """persist_staging=True outside MERGE should emit a warning but not raise."""
+        import logging
+
+        options = {**COMMON_OPTIONS, "persist_staging": True}
+        with caplog.at_level(logging.WARNING):
+            task = SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.OVERWRITE,
+                source_table=DeltaTableStep(table="test"),
+                **options,
+            )
+        assert task.persist_staging is True
+        assert any("persist_staging" in r.message for r in caplog.records)

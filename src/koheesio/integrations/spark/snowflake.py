@@ -314,12 +314,14 @@ class Query(SnowflakeReader):
 
     @field_validator("query")
     def validate_query(cls, query: str) -> str:
-        """Replace escape characters"""
+        """Replace escape characters, ensure query is not empty"""
         query = query.replace("\\n", "\n").replace("\\t", "\t").strip()
+        if not query:
+            raise ValueError("Query cannot be empty")
         return query
 
     def get_options(self, by_alias: bool = True, include: Set[str] = None) -> Dict[str, Any]:
-        """add query to options"""
+        """Add query to options"""
         options = super().get_options(by_alias)
         options["query"] = self.query
         return options
@@ -345,6 +347,13 @@ class DbTableQuery(SnowflakeReader):
     """
 
     dbtable: str = Field(default=..., alias="table", description="The name of the table")
+
+    @field_validator("dbtable")
+    def validate_dbtable(cls, dbtable: str) -> str:
+        """Ensure table name is not empty"""
+        if not dbtable or not dbtable.strip():
+            raise ValueError("Table name cannot be empty")
+        return dbtable
 
 
 class TableExists(SnowflakeTableStep):
@@ -737,27 +746,92 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
             log.warning("checkpoint_location is provided but will be ignored in batch mode")
         if streaming is True and checkpoint_location is None:
             log.warning("checkpoint_location is not provided in streaming mode")
+
+        persist_staging = values.get("persist_staging", False)
+        synchronisation_mode = values.get("synchronisation_mode")
+        if persist_staging and synchronisation_mode and synchronisation_mode != BatchOutputMode.MERGE:
+            log.warning(
+                "persist_staging=True has no effect outside MERGE mode "
+                "(staging table is only used in MERGE). It will be ignored."
+            )
         return values
 
     @model_validator(mode="before")
-    def _synch_mode_check(cls, values: Dict) -> Dict:
-        """Validate requirements for various synchronisation modes"""
-        streaming = values.get("streaming")
+    def _validate_sync_config(cls, values: Dict) -> Dict:
+        """Validate all synchronisation configuration requirements and report all issues at once.
+
+        Checks performed:
+        - Synchronisation mode is one of the allowed values
+        - Mode/streaming combination is valid (OVERWRITE only batch, MERGE only streaming)
+        - MERGE mode requires non-empty key_columns
+        - MERGE mode requires account (needed for staging table operations)
+        - enable_deletion is only valid in MERGE mode
+        - target_table must be in qualified 'schema.table' or 'database.schema.table' format
+        """
+        streaming = values.get("streaming", False)
         synchronisation_mode = values.get("synchronisation_mode")
-        key_columns = values.get("key_columns")
+        key_columns = values.get("key_columns") or []
+        account = values.get("account")
+        target_table = values.get("target_table")
+
+        errors: List[str] = []
 
         allowed_output_modes = [BatchOutputMode.OVERWRITE, BatchOutputMode.MERGE, BatchOutputMode.APPEND]
 
-        if synchronisation_mode not in allowed_output_modes:
-            raise ValueError(
-                f"Synchronisation mode should be one of {', '.join([m.value for m in allowed_output_modes])}"
+        if synchronisation_mode and synchronisation_mode not in allowed_output_modes:
+            mode_val = synchronisation_mode.value if hasattr(synchronisation_mode, "value") else str(synchronisation_mode)
+            errors.append(
+                f"Synchronisation mode '{mode_val}' is not supported. "
+                f"Must be one of: {', '.join(m.value for m in allowed_output_modes)}"
             )
-        if synchronisation_mode == BatchOutputMode.OVERWRITE and streaming is True:
-            raise ValueError("Synchronisation mode can't be 'OVERWRITE' with streaming enabled")
-        if synchronisation_mode == BatchOutputMode.MERGE and streaming is False:
-            raise ValueError("Synchronisation mode can't be 'MERGE' with streaming disabled")
-        if synchronisation_mode == BatchOutputMode.MERGE and len(key_columns) < 1:  # type: ignore
-            raise ValueError("MERGE synchronisation mode requires a list of PK columns in `key_columns`.")
+        elif synchronisation_mode:
+            if synchronisation_mode == BatchOutputMode.OVERWRITE and streaming:
+                errors.append(
+                    "OVERWRITE mode is not compatible with streaming. "
+                    "Use batch mode (streaming=False) or switch to APPEND/MERGE mode."
+                )
+            if synchronisation_mode == BatchOutputMode.MERGE and not streaming:
+                errors.append(
+                    "MERGE mode requires streaming to be enabled. "
+                    "Set streaming=True or switch to OVERWRITE/APPEND mode."
+                )
+            if synchronisation_mode == BatchOutputMode.MERGE and not key_columns:
+                errors.append(
+                    "MERGE mode requires at least one key column in `key_columns` for the join condition. "
+                    "Provide a non-empty list of primary key column names."
+                )
+            if synchronisation_mode == BatchOutputMode.MERGE and not account:
+                errors.append(
+                    "MERGE mode requires the 'account' parameter (Snowflake account ID). "
+                    "It is needed to execute staging table truncate/drop operations."
+                )
+            if values.get("enable_deletion") and synchronisation_mode != BatchOutputMode.MERGE:
+                mode_val = synchronisation_mode.value if hasattr(synchronisation_mode, "value") else str(synchronisation_mode)
+                errors.append(
+                    f"enable_deletion=True has no effect in {mode_val} mode. "
+                    f"Deletion handling is only supported in MERGE mode."
+                )
+
+        if not target_table or not isinstance(target_table, str) or "." not in target_table:
+            errors.append(
+                f"target_table must be in 'schema.table' or 'database.schema.table' format "
+                f"(got '{target_table}'). "
+                f"Provide a fully qualified Snowflake table name."
+            )
+
+        if errors:
+            raise ValueError(
+                "Snowflake sync task configuration has the following issues:\n"
+                + "\n".join(f"  - {e}" for e in errors)
+            )
+
+        # Log configuration summary on successful validation
+        log = LoggingFactory.get_logger(cls.__name__)
+        mode_val = synchronisation_mode.value if hasattr(synchronisation_mode, "value") else str(synchronisation_mode)
+        log.info(
+            f"Snowflake sync task configured: mode={mode_val}, streaming={streaming}, "
+            f"target_table={target_table}"
+        )
 
         return values
 
@@ -1019,6 +1093,14 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
             if self.streaming:
                 self.writer.await_termination()  # type: ignore
             self.drop_table(self.staging_table)
+
+        mode_val = self.synchronisation_mode.value
+        source_name = self.source_table.table_name
+        self.log.info(
+            f"Synchronization complete: "
+            f"mode={mode_val}, streaming={self.streaming}, "
+            f"source_table={source_name}, target_table={self.target_table}"
+        )
 
 
 class TagSnowflakeQuery(Step, ExtraParamsMixin):
