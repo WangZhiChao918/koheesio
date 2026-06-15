@@ -16,6 +16,12 @@ The following Transformations are included:
 - `TitleCase` or `InitCap`
     Converts a string column to title case, where each word starts with a capital letter.
 
+[clean](clean.md):
+
+- `CleanseStrings`
+    Cleanse one or more string columns by applying an ordered combination of cleaning actions (trim, empty-string-to-
+    null, case standardisation, ...) in a single pass.
+
 [concat](concat.md):
 
 - `Concat`
