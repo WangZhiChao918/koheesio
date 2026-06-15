@@ -205,6 +205,24 @@ def test_extension_mismatch_raises_clear_error(csv_comma_file):
     assert "parquet" in msg
 
 
+def test_glob_extension_mismatch_raises_clear_error(data_path):
+    """A glob whose matched files conflict with a binary reader format should fail early.
+
+    The error must name the conflicting extension, the reader format, and the originating
+    glob pattern so the user can tell *which* pattern produced the mismatch.
+    """
+    pattern = f"{data_path}/readers/json_file/*.json"
+    reader = ParquetReader(path=pattern)
+
+    with pytest.raises(ValueError) as excinfo:
+        reader.read()
+
+    msg = str(excinfo.value)
+    assert ".json" in msg
+    assert "parquet" in msg
+    assert pattern in msg
+
+
 def test_glob_pattern_with_match_reads_successfully(data_path):
     """A glob that resolves to files must pass discovery and read normally (unaffected)."""
     expected_data = [
@@ -219,6 +237,22 @@ def test_glob_pattern_with_match_reads_successfully(data_path):
     df = reader.read()
     actual_data = [row.asDict() for row in df.collect()]
     assert actual_data == expected_data
+
+
+def test_recursive_glob_discovers_nested_files(data_path):
+    """A recursive ``**`` pattern must discover files nested several directories deep.
+
+    Regression guard for lake-style ingestion: local discovery globs with ``recursive=True`` so a
+    pattern spanning multiple partition directories is not falsely reported as ``matches=0``. The
+    only ``*0.json`` file under ``readers/`` lives two directories deep (the Delta ``_delta_log``
+    entry), so a non-recursive glob would miss it and raise FileNotFoundError.
+    """
+    pattern = f"{data_path}/readers/**/*0.json"
+    reader = JsonReader(path=pattern)
+
+    # Must not raise FileNotFoundError(matches=0); the nested file is discovered and read.
+    df = reader.read()
+    assert df.count() >= 1
 
 
 def test_text_format_allows_mismatched_extension(csv_comma_file):

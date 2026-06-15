@@ -154,13 +154,16 @@ class FileLoader(Reader, ExtraParamsMixin):
             return str(path.absolute().as_posix())
         return path
 
-    def _check_extension(self, file_path: str) -> None:
-        """Raise a clear ``ValueError`` when a single file's extension conflicts with ``format``.
+    def _check_extension(self, file_path: str, via_glob: Optional[str] = None) -> None:
+        """Raise a clear ``ValueError`` when a file's extension conflicts with ``format``.
 
         The check is deliberately lenient: the ``text`` reader accepts any file, and text-based
         formats (csv/json/txt) are treated as interchangeable. A mismatch is only reported when a
         binary/columnar format (parquet/avro/orc) is involved on either side, since those are the
         cases where Spark would otherwise fail with a hard-to-interpret error.
+
+        When the file was discovered through a glob pattern, pass that pattern as ``via_glob`` so
+        the error message can report the originating pattern alongside the conflicting file.
         """
         if self.format == FileFormat.text:
             return
@@ -173,9 +176,10 @@ class FileLoader(Reader, ExtraParamsMixin):
         if self.format in _BINARY_FORMATS or ext_format in _BINARY_FORMATS:
             # `use_enum_values=True` means `self.format` may be a plain str; normalise for display.
             fmt = getattr(self.format, "value", self.format)
+            glob_context = f" (matched by glob pattern '{via_glob}')" if via_glob else ""
             raise ValueError(
                 f"File extension '{suffix}' (which maps to format '{ext_format.value}') does not "
-                f"match the reader format '{fmt}' for path '{file_path}'. "
+                f"match the reader format '{fmt}' for path '{file_path}'{glob_context}. "
                 f"Verify the file format, or set the reader's `format` explicitly."
             )
 
@@ -189,7 +193,8 @@ class FileLoader(Reader, ExtraParamsMixin):
             FileNotFoundError: when a concrete local path does not exist, or a glob pattern matches
                 no files. The message includes the path/pattern, the ``format`` and (for globs) the
                 number of matches.
-            ValueError: when a single local file's extension conflicts with the reader ``format``.
+            ValueError: when a local file's extension conflicts with the reader ``format`` — either
+                a concrete single file or any file matched by a glob pattern.
         """
         path = str(self.path)
         if not _is_local_path(path):
@@ -199,12 +204,21 @@ class FileLoader(Reader, ExtraParamsMixin):
         fmt = getattr(self.format, "value", self.format)
 
         if _has_glob_magic(path):
-            matches = glob(path)
+            # ``recursive=True`` lets ``**`` span nested directories, matching how Spark/Hadoop
+            # expand glob paths. Without it a valid recursive lake pattern (e.g. ``base/**/*.parquet``
+            # over ``year=/month=/`` partitions) could under-match and raise a false ``matches=0``.
+            matches = glob(path, recursive=True)
             if not matches:
                 raise FileNotFoundError(
                     f"No files matched the glob pattern '{path}' (format='{fmt}', "
                     f"matches=0). Check that the pattern is correct and that the files exist."
                 )
+            self.log.debug("Glob pattern '%s' matched %d path(s) (format='%s').", path, len(matches), fmt)
+            # Validate the extension of each matched *file*; directories are valid partitioned
+            # containers (parquet/orc/avro) and are skipped, mirroring the single-file branch below.
+            for match in matches:
+                if Path(match).is_file():
+                    self._check_extension(match, via_glob=path)
             return
 
         resolved = Path(path)
