@@ -30,8 +30,10 @@ For more information about the available options, see Spark's
 [official documentation](https://spark.apache.org/docs/latest/sql-data-sources.html).
 """
 
+import re
 from typing import Optional, Union
 from enum import Enum
+from glob import glob
 from pathlib import Path
 
 from pyspark.sql.types import StructType
@@ -62,6 +64,49 @@ class FileFormat(str, Enum):
     # xml = "xml"  # TODO: Add support for XML
     # yaml = "yaml"  # TODO: Add support for YAML
     text = "text"
+
+
+# Matches a URI scheme such as ``s3://``, ``s3a://``, ``gs://``, ``hdfs://``, ``abfss://`` ...
+_URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
+
+# Glob metacharacters understood by ``glob.glob``.
+_GLOB_MAGIC_RE = re.compile(r"[*?\[]")
+
+# Binary / columnar formats. A mismatch involving one of these is almost always a genuine
+# error (e.g. reading a CSV file with the Parquet reader produces a cryptic Spark error),
+# whereas text-based formats (csv/json/text) are frequently interchangeable.
+_BINARY_FORMATS = frozenset({FileFormat.parquet, FileFormat.avro, FileFormat.orc})
+
+# Maps a file extension to the format it most likely represents.
+_EXTENSION_TO_FORMAT = {
+    ".csv": FileFormat.csv,
+    ".json": FileFormat.json,
+    ".txt": FileFormat.text,
+    ".parquet": FileFormat.parquet,
+    ".avro": FileFormat.avro,
+    ".orc": FileFormat.orc,
+}
+
+
+def _is_local_path(path: str) -> bool:
+    """Return whether ``path`` points at the local filesystem and is safe to inspect.
+
+    Remote/URI paths (``s3://``, ``hdfs://``, ``dbfs:/`` ...) and comma-separated multi-paths
+    are intentionally treated as *not* local so that valid Spark reads are never altered.
+    """
+    if "," in path:
+        # Spark accepts a comma-separated list of paths; leave those to Spark.
+        return False
+    if path.startswith(("dbfs:", "file:")):
+        return False
+    if _URI_SCHEME_RE.match(path):
+        return False
+    return True
+
+
+def _has_glob_magic(path: str) -> bool:
+    """Return whether ``path`` contains glob metacharacters (``*``, ``?`` or ``[``)."""
+    return bool(_GLOB_MAGIC_RE.search(path))
 
 
 # pylint: disable=line-too-long
@@ -109,8 +154,74 @@ class FileLoader(Reader, ExtraParamsMixin):
             return str(path.absolute().as_posix())
         return path
 
+    def _check_extension(self, file_path: str) -> None:
+        """Raise a clear ``ValueError`` when a single file's extension conflicts with ``format``.
+
+        The check is deliberately lenient: the ``text`` reader accepts any file, and text-based
+        formats (csv/json/txt) are treated as interchangeable. A mismatch is only reported when a
+        binary/columnar format (parquet/avro/orc) is involved on either side, since those are the
+        cases where Spark would otherwise fail with a hard-to-interpret error.
+        """
+        if self.format == FileFormat.text:
+            return
+
+        suffix = Path(file_path).suffix.lower()
+        ext_format = _EXTENSION_TO_FORMAT.get(suffix)
+        if ext_format is None or ext_format == self.format:
+            return
+
+        if self.format in _BINARY_FORMATS or ext_format in _BINARY_FORMATS:
+            # `use_enum_values=True` means `self.format` may be a plain str; normalise for display.
+            fmt = getattr(self.format, "value", self.format)
+            raise ValueError(
+                f"File extension '{suffix}' (which maps to format '{ext_format.value}') does not "
+                f"match the reader format '{fmt}' for path '{file_path}'. "
+                f"Verify the file format, or set the reader's `format` explicitly."
+            )
+
+    def _validate_and_discover_path(self) -> None:
+        """Surface clearer errors for broken local paths before handing off to Spark.
+
+        Only local filesystem paths are inspected. Remote/URI paths (``s3://``, ``hdfs://`` ...)
+        and comma-separated multi-paths are left untouched so that valid reads are unaffected.
+
+        Raises:
+            FileNotFoundError: when a concrete local path does not exist, or a glob pattern matches
+                no files. The message includes the path/pattern, the ``format`` and (for globs) the
+                number of matches.
+            ValueError: when a single local file's extension conflicts with the reader ``format``.
+        """
+        path = str(self.path)
+        if not _is_local_path(path):
+            return
+
+        # `use_enum_values=True` means `self.format` may be a plain str; normalise for messages.
+        fmt = getattr(self.format, "value", self.format)
+
+        if _has_glob_magic(path):
+            matches = glob(path)
+            if not matches:
+                raise FileNotFoundError(
+                    f"No files matched the glob pattern '{path}' (format='{fmt}', "
+                    f"matches=0). Check that the pattern is correct and that the files exist."
+                )
+            return
+
+        resolved = Path(path)
+        if not resolved.exists():
+            raise FileNotFoundError(
+                f"Path does not exist: '{path}' (format='{fmt}'). "
+                f"Check that the path is correct and accessible."
+            )
+
+        # Directories are valid containers for partitioned data (parquet/orc/avro/delta); only
+        # validate the extension of concrete single files.
+        if resolved.is_file():
+            self._check_extension(path)
+
     def execute(self) -> Reader.Output:
         """Reads the file, in batch or as a stream, using the specified format and schema, while applying any extra parameters."""
+        self._validate_and_discover_path()
         reader = self.spark.readStream if self.streaming else self.spark.read
         reader = reader.format(self.format)
 

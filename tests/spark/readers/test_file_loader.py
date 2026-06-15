@@ -11,6 +11,7 @@ from koheesio.spark.readers.file_loader import (
     JsonReader,
     OrcReader,
     ParquetReader,
+    _is_local_path,
 )
 
 pytestmark = pytest.mark.spark
@@ -163,3 +164,83 @@ def test_orc_reader(orc_file):
     df = reader.read()
     actual_data = [row.asDict() for row in df.collect()]
     assert actual_data == expected_data
+
+
+def test_path_does_not_exist_raises_clear_error(data_path):
+    """A non-existent local path should raise a clear FileNotFoundError with path + format."""
+    missing = f"{data_path}/readers/csv_file/does_not_exist.csv"
+    reader = CsvReader(path=missing, header=True)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        reader.read()
+
+    msg = str(excinfo.value)
+    assert "does_not_exist.csv" in msg
+    assert "format='csv'" in msg
+
+
+def test_glob_pattern_no_match_raises_clear_error(data_path):
+    """A glob pattern that matches nothing should report the pattern, format, and matches=0."""
+    pattern = f"{data_path}/readers/csv_file/*.tsv"
+    reader = CsvReader(path=pattern, header=True)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        reader.read()
+
+    msg = str(excinfo.value)
+    assert pattern in msg
+    assert "matches=0" in msg
+    assert "format='csv'" in msg
+
+
+def test_extension_mismatch_raises_clear_error(csv_comma_file):
+    """Reading a .csv file with the Parquet reader should fail early with a clear ValueError."""
+    reader = ParquetReader(path=csv_comma_file)
+
+    with pytest.raises(ValueError) as excinfo:
+        reader.read()
+
+    msg = str(excinfo.value)
+    assert ".csv" in msg
+    assert "parquet" in msg
+
+
+def test_glob_pattern_with_match_reads_successfully(data_path):
+    """A glob that resolves to files must pass discovery and read normally (unaffected)."""
+    expected_data = [
+        {"string": "string1", "int": 1, "float": 1.0},
+        {"string": "string2", "int": 2, "float": 2.0},
+        {"string": "string3", "int": 3, "float": 3.0},
+    ]
+    # Matches only dummy_simple.json (not dummy.json) in the json_file directory.
+    pattern = f"{data_path}/readers/json_file/dummy_s*.json"
+    reader = JsonReader(path=pattern)
+
+    df = reader.read()
+    actual_data = [row.asDict() for row in df.collect()]
+    assert actual_data == expected_data
+
+
+def test_text_format_allows_mismatched_extension(csv_comma_file):
+    """The text reader accepts any file, so a .csv path must not trigger an extension error."""
+    reader = FileLoader(path=csv_comma_file, format="text")
+
+    # Should not raise: reads the CSV as plain text lines.
+    df = reader.read()
+    assert df.count() == 4
+
+
+def test_remote_and_multipath_skip_local_validation():
+    """Remote URIs and comma-separated multi-paths must bypass local discovery checks."""
+    assert _is_local_path("s3://bucket/data/file.csv") is False
+    assert _is_local_path("s3a://bucket/data/file.csv") is False
+    assert _is_local_path("hdfs://namenode/data/file.csv") is False
+    assert _is_local_path("abfss://container@acct.dfs.core.windows.net/p") is False
+    assert _is_local_path("dbfs:/mnt/data/file.csv") is False
+    assert _is_local_path("file:/tmp/data/file.csv") is False
+    assert _is_local_path("/data/a.csv,/data/b.csv") is False
+
+    # Plain local paths (incl. Windows drive paths) are still inspected.
+    assert _is_local_path("/data/local/file.csv") is True
+    assert _is_local_path("relative/local/file.csv") is True
+    assert _is_local_path("E:/work/data/file.csv") is True
