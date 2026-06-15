@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 import pyspark.sql.types as T
@@ -163,3 +165,143 @@ def test_orc_reader(orc_file):
     df = reader.read()
     actual_data = [row.asDict() for row in df.collect()]
     assert actual_data == expected_data
+
+
+# ---------------------------------------------------------------------------
+# Path validation & error-message tests
+# ---------------------------------------------------------------------------
+
+
+class TestPathNotFound:
+    """Non-existent paths must raise FileNotFoundError with contextual info."""
+
+    def test_nonexistent_file(self):
+        reader = CsvReader(path="/no/such/file_or_dir/missing.csv", header=True)
+        with pytest.raises(FileNotFoundError) as exc_info:
+            reader.read()
+
+        msg = str(exc_info.value)
+        assert "/no/such/file_or_dir/missing.csv" in msg
+        assert "csv" in msg
+        assert "does not exist" in msg
+
+    def test_nonexistent_path_with_json_reader(self):
+        reader = JsonReader(path="/tmp/definitely_not_here/data.json")
+        with pytest.raises(FileNotFoundError) as exc_info:
+            reader.read()
+
+        msg = str(exc_info.value)
+        assert "json" in msg
+        assert "/tmp/definitely_not_here/data.json" in msg
+
+
+class TestGlobNoMatch:
+    """Glob patterns that match zero files must raise FileNotFoundError."""
+
+    def test_glob_zero_matches(self):
+        reader = CsvReader(path="/no/such/dir/*.csv", header=True)
+        with pytest.raises(FileNotFoundError) as exc_info:
+            reader.read()
+
+        msg = str(exc_info.value)
+        assert "No files matched" in msg
+        assert "*.csv" in msg
+        assert "csv" in msg
+
+    def test_glob_question_mark_no_match(self):
+        reader = JsonReader(path="/no/such/dir/data_?.json")
+        with pytest.raises(FileNotFoundError) as exc_info:
+            reader.read()
+
+        msg = str(exc_info.value)
+        assert "No files matched" in msg
+
+
+class TestGlobWithMatches:
+    """Glob patterns that match files should read normally."""
+
+    def test_glob_reads_matched_csv_files(self, data_path):
+        pattern = f"{data_path}/readers/csv_file/*.csv"
+        schema = "string STRING, int INT, float FLOAT"
+        reader = CsvReader(path=pattern, header=True, schema=schema)
+        df = reader.read()
+        assert df.count() >= 3  # both CSV files combined
+
+
+class TestDirectoryPathNoExtensionCheck:
+    """Directory paths (e.g. parquet partitions) must not trigger extension warnings."""
+
+    def test_parquet_directory_no_warning(self, parquet_file, caplog):
+        with caplog.at_level(logging.WARNING):
+            reader = ParquetReader(path=parquet_file)
+            df = reader.read()
+            assert df.count() >= 3
+
+        # No extension-mismatch warning should appear for directory paths
+        assert "Extension mismatch" not in caplog.text
+
+
+class TestExtensionMismatchWarning:
+    """Reading a file whose extension does not match the format should log a warning."""
+
+    def test_csv_reader_on_json_file_warns(self, json_file, caplog):
+        with caplog.at_level(logging.WARNING):
+            reader = CsvReader(path=json_file, header=True)
+            # We only exercise the validation path — the actual Spark read may
+            # succeed or fail depending on file content, but the warning must
+            # have been emitted before Spark is invoked.
+            try:
+                reader.read()
+            except Exception:
+                pass  # Spark may fail to parse JSON as CSV, that's fine
+
+        assert "Extension mismatch" in caplog.text
+        assert "csv" in caplog.text
+        assert json_file in caplog.text
+
+    def test_json_reader_on_csv_file_warns(self, csv_comma_file, caplog):
+        with caplog.at_level(logging.WARNING):
+            reader = JsonReader(path=csv_comma_file)
+            try:
+                reader.read()
+            except Exception:
+                pass
+
+        assert "Extension mismatch" in caplog.text
+        assert "json" in caplog.text
+
+    def test_parquet_reader_on_csv_file_warns(self, csv_comma_file, caplog):
+        with caplog.at_level(logging.WARNING):
+            reader = ParquetReader(path=csv_comma_file)
+            try:
+                reader.read()
+            except Exception:
+                pass
+
+        assert "Extension mismatch" in caplog.text
+        assert "parquet" in caplog.text
+
+
+class TestNormalPathsUnaffected:
+    """Existing happy-path reads must continue to work without any change."""
+
+    def test_csv_file_read(self, csv_comma_file):
+        schema = "string STRING, int INT, float FLOAT"
+        reader = CsvReader(path=csv_comma_file, header=True, schema=schema)
+        df = reader.read()
+        assert df.count() == 3
+
+    def test_json_file_read(self, json_file):
+        reader = JsonReader(path=json_file)
+        df = reader.read()
+        assert df.count() == 3
+
+    def test_parquet_dir_read(self, parquet_file):
+        reader = ParquetReader(path=parquet_file)
+        df = reader.read()
+        assert df.count() >= 3
+
+    def test_orc_dir_read(self, orc_file):
+        reader = OrcReader(path=orc_file)
+        df = reader.read()
+        assert df.count() == 3

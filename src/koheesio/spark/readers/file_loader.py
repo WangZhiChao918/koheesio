@@ -30,8 +30,10 @@ For more information about the available options, see Spark's
 [official documentation](https://spark.apache.org/docs/latest/sql-data-sources.html).
 """
 
-from typing import Optional, Union
+from typing import List, Optional, Union
 from enum import Enum
+import glob as glob_module
+import os
 from pathlib import Path
 
 from pyspark.sql.types import StructType
@@ -62,6 +64,22 @@ class FileFormat(str, Enum):
     # xml = "xml"  # TODO: Add support for XML
     # yaml = "yaml"  # TODO: Add support for YAML
     text = "text"
+
+
+# Mapping from file format to commonly associated file extensions.
+# Used to detect likely mismatches between the declared format and the actual
+# files on disk before Spark attempts to read them.
+FORMAT_EXTENSIONS = {
+    FileFormat.csv: [".csv", ".tsv", ".txt"],
+    FileFormat.parquet: [".parquet", ".pq"],
+    FileFormat.avro: [".avro"],
+    FileFormat.json: [".json", ".jsonl", ".ndjson"],
+    FileFormat.orc: [".orc"],
+    FileFormat.text: [".txt", ".text", ".log"],
+}
+
+# Characters that indicate a glob pattern in a path
+_GLOB_CHARS = {"*", "?", "["}
 
 
 # pylint: disable=line-too-long
@@ -109,8 +127,97 @@ class FileLoader(Reader, ExtraParamsMixin):
             return str(path.absolute().as_posix())
         return path
 
+    @staticmethod
+    def _has_glob_chars(path: str) -> bool:
+        """Return True if the path contains any glob metacharacter."""
+        return any(c in path for c in _GLOB_CHARS)
+
+    def _resolve_and_validate_path(self) -> str:
+        """Validate that the path exists and resolve glob patterns.
+
+        Returns the path string to pass to Spark's ``load()``.  For glob
+        patterns the original pattern is returned (Spark handles globs
+        natively) after verifying that at least one file matches.
+
+        Raises
+        ------
+        FileNotFoundError
+            If a non-glob path does not exist, or if a glob pattern matches
+            zero files.
+        """
+        path = self.path
+
+        if self._has_glob_chars(path):
+            matches = sorted(glob_module.glob(path))
+            if not matches:
+                raise FileNotFoundError(
+                    f"[FileLoader] No files matched the glob pattern.\n"
+                    f"  path   : {path}\n"
+                    f"  format : {self.format.value}\n"
+                    f"Verify the pattern and ensure that matching files exist on disk."
+                )
+            self.log.info(
+                f"[FileLoader] Glob pattern matched {len(matches)} path(s): "
+                f"{matches[0]}{'...' if len(matches) > 1 else ''}"
+            )
+            # Check extensions of matched files (only for actual files)
+            self._check_extensions(matches)
+            return path
+
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"[FileLoader] Path does not exist.\n"
+                f"  path   : {path}\n"
+                f"  format : {self.format.value}\n"
+                f"Verify the path and ensure the file or directory is accessible."
+            )
+
+        # For non-glob paths, check extension only if the path is a file
+        if os.path.isfile(path):
+            self._check_extensions([path])
+
+        return path
+
+    def _check_extensions(self, paths: List[str]) -> None:
+        """Log a warning when file extensions do not match the declared format.
+
+        Only files with a recognizable suffix are checked; directories and
+        extension-less files are silently skipped.
+        """
+        expected = FORMAT_EXTENSIONS.get(self.format, [])
+        if not expected:
+            return
+
+        mismatched: List[str] = []
+        for p in paths:
+            if os.path.isdir(p):
+                continue
+            suffixes = Path(p).suffixes  # e.g. ['.snappy', '.parquet']
+            if not suffixes:
+                continue
+            # Check if any of the path's suffixes (beyond the first compound
+            # prefix like .snappy) matches an expected extension
+            if not any(s.lower() in expected for s in suffixes):
+                mismatched.append(p)
+
+        if mismatched:
+            sample = mismatched[:5]
+            self.log.warning(
+                f"[FileLoader] Extension mismatch detected — "
+                f"{len(mismatched)} file(s) do not have an extension "
+                f"typically associated with format '{self.format.value}'.\n"
+                f"  expected extensions : {expected}\n"
+                f"  sample paths        : {sample}\n"
+                f"  path                : {self.path}\n"
+                f"This may be intentional (e.g. compound extensions like "
+                f".gz.parquet). If not, verify the format and file extensions."
+            )
+
     def execute(self) -> Reader.Output:
         """Reads the file, in batch or as a stream, using the specified format and schema, while applying any extra parameters."""
+        # Validate path existence / glob match before handing off to Spark
+        resolved_path = self._resolve_and_validate_path()
+
         reader = self.spark.readStream if self.streaming else self.spark.read
         reader = reader.format(self.format)
 
@@ -120,7 +227,7 @@ class FileLoader(Reader, ExtraParamsMixin):
         if self.extra_params:
             reader = reader.options(**self.extra_params)
 
-        self.output.df = reader.load(self.path)  # type: ignore
+        self.output.df = reader.load(resolved_path)  # type: ignore
 
 
 class CsvReader(FileLoader):
