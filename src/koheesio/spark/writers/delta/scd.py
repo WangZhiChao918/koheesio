@@ -15,7 +15,7 @@ and seamless integration with Delta tables in Spark.
 
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 from logging import Logger
 
 from delta.tables import DeltaMergeBuilder, DeltaTable
@@ -25,12 +25,36 @@ from pydantic import InstanceOf
 from pyspark.sql import functions as f
 from pyspark.sql.types import DateType, TimestampType
 
-from koheesio.models import Field
+from koheesio.models import BaseModel, Field
 from koheesio.spark import Column, DataFrame, SparkSession
 from koheesio.spark.delta import DeltaTableStep
 from koheesio.spark.functions import current_timestamp_utc
 from koheesio.spark.writers import Writer
 from koheesio.spark.writers.delta.utils import get_delta_table_for_name
+
+
+class SCD2ExecutionSummary(BaseModel):
+    """Summary of an SCD2 merge execution, useful for monitoring data changes in scheduler logs.
+
+    Attributes
+    ----------
+    num_source_rows : int
+        Total number of rows in the source DataFrame before merge.
+    num_new_rows : int
+        Number of new rows inserted (source keys not found in target).
+    num_scd2_updated_rows : int
+        Number of SCD2 changes detected (old record closed, new record inserted).
+    num_scd1_updated_rows : int
+        Number of SCD1 in-place updates (non-tracked attribute changes).
+    num_unchanged_rows : int
+        Number of source rows with no detected changes (skipped by merge).
+    """
+
+    num_source_rows: int = Field(default=0, description="Total rows in source DataFrame")
+    num_new_rows: int = Field(default=0, description="New rows inserted")
+    num_scd2_updated_rows: int = Field(default=0, description="SCD2 changes (close + new version)")
+    num_scd1_updated_rows: int = Field(default=0, description="SCD1 in-place updates")
+    num_unchanged_rows: int = Field(default=0, description="Rows with no changes")
 
 
 class SCD2DeltaTableWriter(Writer):
@@ -87,6 +111,18 @@ class SCD2DeltaTableWriter(Writer):
         default_factory=list,
         description="Auto generated columns from target Delta table. Will be used to exclude from merge logic",
     )
+    execution_summary: bool = Field(
+        default=False,
+        description="When True, compute and log a merge execution summary (inserts, updates, unchanged counts)",
+    )
+
+    class Output(Writer.Output):
+        """Output for SCD2DeltaTableWriter."""
+
+        execution_summary: Optional[SCD2ExecutionSummary] = Field(
+            default=None,
+            description="Summary of SCD2 merge execution; populated when execution_summary=True",
+        )
 
     @staticmethod
     def _prepare_attr_clause(attrs: List[str], src_alias: str, dest_alias: str) -> Optional[str]:
@@ -408,6 +444,51 @@ class SCD2DeltaTableWriter(Writer):
 
         return df
 
+    def _compute_execution_summary(
+        self,
+        staged: DataFrame,
+        num_source_rows: int,
+        **_kwargs: dict,
+    ) -> SCD2ExecutionSummary:
+        """Compute execution summary from the staged DataFrame.
+
+        The staged DataFrame must still contain the ``__meta_scd2_system_merge_action`` column,
+        which holds values: 'I' (insert), 'UC' (SCD2 update-close), 'U' (SCD1 update).
+
+        Parameters
+        ----------
+        staged : DataFrame
+            The staged DataFrame after ``_prepare_staging`` and before ``_add_scd2_columns``.
+        num_source_rows : int
+            Total number of rows in the source DataFrame.
+
+        Returns
+        -------
+        SCD2ExecutionSummary
+            Summary containing counts for inserts, SCD2 updates, SCD1 updates, and unchanged rows.
+        """
+        action_counts: Dict[str, int] = {}
+        for row in (
+            staged.groupBy("__meta_scd2_system_merge_action")
+            .agg(f.count("*").alias("cnt"))
+            .collect()
+        ):
+            action_counts[row["__meta_scd2_system_merge_action"]] = row["cnt"]
+
+        num_new = action_counts.get("I", 0)
+        # 'UC' produces 2 rows per change (close old + insert new), divide by 2 for actual change count
+        num_scd2 = action_counts.get("UC", 0) // 2
+        num_scd1 = action_counts.get("U", 0)
+        num_unchanged = num_source_rows - num_new - num_scd2 - num_scd1
+
+        return SCD2ExecutionSummary(
+            num_source_rows=num_source_rows,
+            num_new_rows=num_new,
+            num_scd2_updated_rows=num_scd2,
+            num_scd1_updated_rows=num_scd1,
+            num_unchanged_rows=num_unchanged,
+        )
+
     def _prepare_merge_builder(
         self,
         delta_table: DeltaTable,
@@ -528,8 +609,9 @@ class SCD2DeltaTableWriter(Writer):
 
         system_merge_action += " ELSE NULL END"
 
-        # Prepare the staged DataFrame
-        staged = (
+        # Prepare the staged DataFrame (phase 1: before SCD2 struct columns are added)
+        # The __meta_scd2_system_merge_action column is still present at this stage.
+        staged_pre_scd2 = (
             self.df.withColumn(
                 "__meta_scd2_timestamp",
                 self._scd2_timestamp(scd2_timestamp_col=self.scd2_timestamp_col, spark=self.spark),
@@ -559,13 +641,31 @@ class SCD2DeltaTableWriter(Writer):
                 "__meta_scd2_effective_time",
                 self._scd2_effective_time(meta_scd2_effective_time_col=meta_scd2_effective_time_col),
             )
-            .transform(
-                func=self._add_scd2_columns,
-                meta_scd2_struct_col_name=self.meta_scd2_struct_col_name,
-                meta_scd2_effective_time_col_name=self.meta_scd2_effective_time_col_name,
-                meta_scd2_end_time_col_name=self.meta_scd2_end_time_col_name,
-                meta_scd2_is_current_col_name=self.meta_scd2_is_current_col_name,
+        )
+
+        # Optionally compute execution summary before _add_scd2_columns drops the action column
+        if self.execution_summary:
+            num_source_rows = self.df.count()
+            summary = self._compute_execution_summary(staged=staged_pre_scd2, num_source_rows=num_source_rows)
+            self.log.info(
+                "SCD2 merge summary for table '%s': "
+                "source_rows=%d, new=%d, scd2_updated=%d, scd1_updated=%d, unchanged=%d",
+                self.table.table_name,
+                summary.num_source_rows,
+                summary.num_new_rows,
+                summary.num_scd2_updated_rows,
+                summary.num_scd1_updated_rows,
+                summary.num_unchanged_rows,
             )
+            self.output.execution_summary = summary
+
+        # Phase 2: add SCD2 struct columns and execute merge
+        staged = staged_pre_scd2.transform(
+            func=self._add_scd2_columns,
+            meta_scd2_struct_col_name=self.meta_scd2_struct_col_name,
+            meta_scd2_effective_time_col_name=self.meta_scd2_effective_time_col_name,
+            meta_scd2_end_time_col_name=self.meta_scd2_end_time_col_name,
+            meta_scd2_is_current_col_name=self.meta_scd2_is_current_col_name,
         )
 
         self._prepare_merge_builder(

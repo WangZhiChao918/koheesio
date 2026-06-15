@@ -15,7 +15,7 @@ from koheesio.spark import DataFrame
 from koheesio.spark.delta import DeltaTableStep
 from koheesio.spark.functions import current_timestamp_utc
 from koheesio.spark.utils import SPARK_MINOR_VERSION
-from koheesio.spark.writers.delta.scd import SCD2DeltaTableWriter
+from koheesio.spark.writers.delta.scd import SCD2DeltaTableWriter, SCD2ExecutionSummary
 from koheesio.spark.writers.delta.utils import SparkConnectDeltaTableException
 
 pytestmark = pytest.mark.spark
@@ -447,3 +447,171 @@ def test_scd2_logic(spark):
             )
 
             assert res == expected
+
+
+def test_scd2_execution_summary_counts(spark):
+    """Integration test: verify execution summary counts after an SCD2 merge."""
+    from koheesio.spark.utils.connect import is_remote_session
+
+    target_table = "test_scd2_summary_counts"
+
+    spark.sql(
+        f"""CREATE OR REPLACE TABLE {target_table} (
+            merge_key STRING NOT NULL,
+            value_scd2 STRING,
+            value_scd1 STRING,
+            _scd2 STRUCT<effective_time: TIMESTAMP, end_time: TIMESTAMP, is_current: BOOLEAN>
+        )
+        USING delta"""
+    )
+
+    writer = SCD2DeltaTableWriter(
+        table=DeltaTableStep(table=target_table),
+        scd2_timestamp_col=F.col("run_date"),
+        exclude_columns=["run_date"],
+        merge_key="merge_key",
+        scd2_columns=["value_scd2"],
+        scd1_columns=["value_scd1"],
+        execution_summary=True,
+    )
+
+    # First batch: all inserts (2 new keys)
+    changes_df = spark.createDataFrame(
+        [("key1", "value1", "scd1-v1", "2024-05-01"), ("key2", "value2", "scd1-v2", "2024-04-01")],
+        ["merge_key", "value_scd2", "value_scd1", "run_date"],
+    ).withColumn("run_date", F.to_timestamp("run_date"))
+
+    writer.df = changes_df
+    if 3.4 < SPARK_MINOR_VERSION < 4.0 and is_remote_session():
+        pytest.skip("DeltaTable.forName not supported in Spark Connect remote session")
+
+    writer.execute()
+    summary = writer.output.execution_summary
+    assert summary is not None
+    assert summary.num_source_rows == 2
+    assert summary.num_new_rows == 2
+    assert summary.num_scd2_updated_rows == 0
+    assert summary.num_scd1_updated_rows == 0
+    assert summary.num_unchanged_rows == 0
+
+    # Second batch: key1 SCD2 change, key2 unchanged, key3 new
+    changes_df2 = spark.createDataFrame(
+        [
+            ("key1", "value1_updated", "scd1-v1", "2024-05-02"),
+            ("key2", "value2", "scd1-v2", "2024-04-01"),
+            ("key3", "value3", "scd1-v3", "2024-05-03"),
+        ],
+        ["merge_key", "value_scd2", "value_scd1", "run_date"],
+    ).withColumn("run_date", F.to_timestamp("run_date"))
+
+    writer.df = changes_df2
+    writer.execute()
+    summary2 = writer.output.execution_summary
+    assert summary2 is not None
+    assert summary2.num_source_rows == 3
+    assert summary2.num_new_rows == 1  # key3
+    assert summary2.num_scd2_updated_rows == 1  # key1 SCD2 change
+    assert summary2.num_scd1_updated_rows == 0
+    assert summary2.num_unchanged_rows == 1  # key2
+
+    # Third batch: key1 SCD1 change, key2 SCD2 change, key3 unchanged
+    changes_df3 = spark.createDataFrame(
+        [
+            ("key1", "value1_updated", "scd1-v1-changed", "2024-05-02"),
+            ("key2", "value2_updated", "scd1-v2", "2024-05-14"),
+            ("key3", "value3", "scd1-v3", "2024-05-03"),
+        ],
+        ["merge_key", "value_scd2", "value_scd1", "run_date"],
+    ).withColumn("run_date", F.to_timestamp("run_date"))
+
+    writer.df = changes_df3
+    writer.execute()
+    summary3 = writer.output.execution_summary
+    assert summary3 is not None
+    assert summary3.num_source_rows == 3
+    assert summary3.num_new_rows == 0
+    assert summary3.num_scd2_updated_rows == 1  # key2 SCD2 change
+    assert summary3.num_scd1_updated_rows == 1  # key1 SCD1 change
+    assert summary3.num_unchanged_rows == 1  # key3
+
+
+def test_scd2_execution_summary_logging(spark, caplog):
+    """Integration test: verify execution summary is logged at INFO level."""
+    import logging
+    from koheesio.spark.utils.connect import is_remote_session
+
+    target_table = "test_scd2_summary_logging"
+
+    spark.sql(
+        f"""CREATE OR REPLACE TABLE {target_table} (
+            merge_key STRING NOT NULL,
+            value_scd2 STRING,
+            _scd2 STRUCT<effective_time: TIMESTAMP, end_time: TIMESTAMP, is_current: BOOLEAN>
+        )
+        USING delta"""
+    )
+
+    writer = SCD2DeltaTableWriter(
+        table=DeltaTableStep(table=target_table),
+        scd2_timestamp_col=F.col("run_date"),
+        exclude_columns=["run_date"],
+        merge_key="merge_key",
+        scd2_columns=["value_scd2"],
+        execution_summary=True,
+    )
+
+    changes_df = spark.createDataFrame(
+        [("key1", "value1", "2024-05-01")],
+        ["merge_key", "value_scd2", "run_date"],
+    ).withColumn("run_date", F.to_timestamp("run_date"))
+
+    writer.df = changes_df
+    if 3.4 < SPARK_MINOR_VERSION < 4.0 and is_remote_session():
+        pytest.skip("DeltaTable.forName not supported in Spark Connect remote session")
+
+    with caplog.at_level(logging.INFO):
+        writer.execute()
+
+    # Check that summary log message was emitted
+    summary_logs = [r for r in caplog.records if "SCD2 merge summary" in r.message]
+    assert len(summary_logs) >= 1
+    log_msg = summary_logs[-1].message
+    assert "source_rows=1" in log_msg
+    assert "new=1" in log_msg
+
+
+def test_scd2_execution_summary_disabled_by_default(spark):
+    """Backward compatibility test: execution_summary should be None when not opted in."""
+    from koheesio.spark.utils.connect import is_remote_session
+
+    target_table = "test_scd2_summary_disabled"
+
+    spark.sql(
+        f"""CREATE OR REPLACE TABLE {target_table} (
+            merge_key STRING NOT NULL,
+            value_scd2 STRING,
+            _scd2 STRUCT<effective_time: TIMESTAMP, end_time: TIMESTAMP, is_current: BOOLEAN>
+        )
+        USING delta"""
+    )
+
+    writer = SCD2DeltaTableWriter(
+        table=DeltaTableStep(table=target_table),
+        scd2_timestamp_col=F.col("run_date"),
+        exclude_columns=["run_date"],
+        merge_key="merge_key",
+        scd2_columns=["value_scd2"],
+        # execution_summary not set (defaults to False)
+    )
+
+    changes_df = spark.createDataFrame(
+        [("key1", "value1", "2024-05-01")],
+        ["merge_key", "value_scd2", "run_date"],
+    ).withColumn("run_date", F.to_timestamp("run_date"))
+
+    writer.df = changes_df
+    if 3.4 < SPARK_MINOR_VERSION < 4.0 and is_remote_session():
+        pytest.skip("DeltaTable.forName not supported in Spark Connect remote session")
+
+    writer.execute()
+    assert writer.output.execution_summary is None

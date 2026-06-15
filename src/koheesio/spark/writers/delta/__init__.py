@@ -9,7 +9,7 @@ Classes:
 """
 
 from koheesio.spark.writers.delta.batch import BatchOutputMode, DeltaTableWriter
-from koheesio.spark.writers.delta.scd import SCD2DeltaTableWriter
+from koheesio.spark.writers.delta.scd import SCD2DeltaTableWriter, SCD2ExecutionSummary
 from koheesio.spark.writers.delta.stream import DeltaTableStreamWriter
 
-__all__ = ["DeltaTableWriter", "DeltaTableStreamWriter", "SCD2DeltaTableWriter", "BatchOutputMode"]
+__all__ = ["DeltaTableWriter", "DeltaTableStreamWriter", "SCD2DeltaTableWriter", "SCD2ExecutionSummary", "BatchOutputMode"]
