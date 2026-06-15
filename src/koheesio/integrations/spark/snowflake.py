@@ -312,6 +312,16 @@ class Query(SnowflakeReader):
 
     query: str = Field(default=..., description="The query to run")
 
+    @model_validator(mode="before")
+    def _check_no_dbtable(cls, values: Dict) -> Dict:
+        """Reject 'dbtable'/'table' parameter — use DbTableQuery for table-based reads."""
+        if values.get("dbtable") or values.get("table"):
+            raise ValueError(
+                "'query' and 'dbtable' (or 'table') are mutually exclusive. "
+                "Use the Query class for SQL query reads, or DbTableQuery for table reads — not both."
+            )
+        return values
+
     @field_validator("query")
     def validate_query(cls, query: str) -> str:
         """Replace escape characters, ensure query is not empty"""
@@ -347,6 +357,16 @@ class DbTableQuery(SnowflakeReader):
     """
 
     dbtable: str = Field(default=..., alias="table", description="The name of the table")
+
+    @model_validator(mode="before")
+    def _check_no_query(cls, values: Dict) -> Dict:
+        """Reject 'query' parameter — use Query for query-based reads."""
+        if values.get("query"):
+            raise ValueError(
+                "'query' and 'dbtable' (or 'table') are mutually exclusive. "
+                "Use the Query class for SQL query reads, or DbTableQuery for table reads — not both."
+            )
+        return values
 
     @field_validator("dbtable")
     def validate_dbtable(cls, dbtable: str) -> str:
@@ -726,6 +746,18 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
 
     writer_: Optional[Union[ForEachBatchStreamWriter, SnowflakeWriter]] = None
 
+    class Output(SparkStep.Output):
+        """Output class for SynchronizeDeltaToSnowflakeTask, includes sync metadata."""
+
+        source_df: Optional[DataFrame] = Field(default=None, description="The source Delta DataFrame read from the source table")
+        target_df: Optional[DataFrame] = Field(default=None, description="The DataFrame that was written to Snowflake")
+        target_table: Optional[str] = Field(default=None, description="Snowflake target table that was written to")
+        synchronisation_mode: Optional[str] = Field(
+            default=None, description="Synchronisation mode that was used (overwrite, append, merge)"
+        )
+        streaming: Optional[bool] = Field(default=None, description="Whether streaming mode was used")
+        source_table_name: Optional[str] = Field(default=None, description="Name of the source Delta table")
+
     @field_validator("staging_table_name")
     def _validate_staging_table(cls, staging_table_name: str) -> str:
         """Validate the staging table name and return it if it's valid."""
@@ -773,8 +805,22 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
         key_columns = values.get("key_columns") or []
         account = values.get("account")
         target_table = values.get("target_table")
+        database = values.get("database") or values.get("sfDatabase")
+        sf_schema = values.get("sfSchema") or values.get("schema")
 
         errors: List[str] = []
+
+        # Validate required connection parameters
+        if not database:
+            errors.append(
+                "'database' is required for synchronisation. "
+                "Provide the Snowflake database name via the 'database' (or 'sfDatabase') parameter."
+            )
+        if not sf_schema:
+            errors.append(
+                "'schema' is required for synchronisation. "
+                "Provide the Snowflake schema name via the 'schema' (or 'sfSchema') parameter."
+            )
 
         allowed_output_modes = [BatchOutputMode.OVERWRITE, BatchOutputMode.MERGE, BatchOutputMode.APPEND]
 
@@ -830,7 +876,7 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
         mode_val = synchronisation_mode.value if hasattr(synchronisation_mode, "value") else str(synchronisation_mode)
         log.info(
             f"Snowflake sync task configured: mode={mode_val}, streaming={streaming}, "
-            f"target_table={target_table}"
+            f"target_table={target_table}, database={database}, schema={sf_schema}"
         )
 
         return values
@@ -1094,8 +1140,14 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
                 self.writer.await_termination()  # type: ignore
             self.drop_table(self.staging_table)
 
+        # Populate sync result metadata
         mode_val = self.synchronisation_mode.value
         source_name = self.source_table.table_name
+        self.output.target_table = self.target_table
+        self.output.synchronisation_mode = mode_val
+        self.output.streaming = self.streaming
+        self.output.source_table_name = source_name
+
         self.log.info(
             f"Synchronization complete: "
             f"mode={mode_val}, streaming={self.streaming}, "

@@ -570,17 +570,18 @@ class TestEnhancedValidations:
                 streaming=False,
                 synchronisation_mode=BatchOutputMode.MERGE,
                 source_table=DeltaTableStep(table="test"),
-                **{k: v for k, v in COMMON_OPTIONS.items() if k not in ("target_table", "key_columns")},
+                **{k: v for k, v in COMMON_OPTIONS.items() if k not in ("target_table", "key_columns", "database")},
                 key_columns=[],
                 target_table="invalid_no_dot",
             )
 
         error_text = str(exc_info.value)
-        # All four issues should appear in the aggregated error
+        # All issues should appear in the aggregated error
         assert "MERGE mode requires streaming" in error_text
         assert "key column" in error_text.lower()
         assert "account" in error_text.lower()
         assert "target_table" in error_text
+        assert "database" in error_text.lower()
 
     def test_empty_query_rejected(self):
         """Query with empty/whitespace-only query string must be rejected."""
@@ -639,3 +640,136 @@ class TestEnhancedValidations:
             )
         assert task.persist_staging is True
         assert any("persist_staging" in r.message for r in caplog.records)
+
+    def test_query_rejects_dbtable(self):
+        """Query must not accept a 'dbtable' or 'table' parameter (mutually exclusive)."""
+        from koheesio.integrations.spark.snowflake import Query
+
+        with pytest.raises(pydantic.ValidationError, match="mutually exclusive"):
+            Query(
+                url="url",
+                user="user",
+                password="password",
+                database="db",
+                schema="schema",
+                role="role",
+                warehouse="warehouse",
+                query="SELECT 1",
+                table="some_table",
+            )
+
+    def test_query_rejects_dbtable_by_alias(self):
+        """Query must reject 'dbtable' key directly as well."""
+        from koheesio.integrations.spark.snowflake import Query
+
+        with pytest.raises(pydantic.ValidationError, match="mutually exclusive"):
+            Query(
+                url="url",
+                user="user",
+                password="password",
+                database="db",
+                schema="schema",
+                role="role",
+                warehouse="warehouse",
+                query="SELECT 1",
+                dbtable="some_table",
+            )
+
+    def test_dbtable_query_rejects_query(self):
+        """DbTableQuery must not accept a 'query' parameter (mutually exclusive)."""
+        from koheesio.integrations.spark.snowflake import DbTableQuery
+
+        with pytest.raises(pydantic.ValidationError, match="mutually exclusive"):
+            DbTableQuery(
+                url="url",
+                user="user",
+                password="password",
+                database="db",
+                schema="schema",
+                role="role",
+                warehouse="warehouse",
+                table="some_table",
+                query="SELECT 1",
+            )
+
+    def test_query_accepts_query_only(self):
+        """Query with only 'query' (no table/dbtable) must be accepted."""
+        from koheesio.integrations.spark.snowflake import Query
+
+        q = Query(
+            url="url",
+            user="user",
+            password="password",
+            database="db",
+            schema="schema",
+            role="role",
+            warehouse="warehouse",
+            query="SELECT 1",
+        )
+        assert q.query == "SELECT 1"
+
+    def test_dbtable_accepts_table_only(self):
+        """DbTableQuery with only 'table' (no query) must be accepted."""
+        from koheesio.integrations.spark.snowflake import DbTableQuery
+
+        t = DbTableQuery(
+            url="url",
+            user="user",
+            password="password",
+            database="db",
+            schema="schema",
+            role="role",
+            warehouse="warehouse",
+            table="my_schema.my_table",
+        )
+        assert t.dbtable == "my_schema.my_table"
+
+    def test_sync_requires_database(self):
+        """SynchronizeDeltaToSnowflakeTask must fail when 'database' is missing."""
+        opts = {k: v for k, v in COMMON_OPTIONS.items() if k != "database"}
+        with pytest.raises(pydantic.ValidationError, match="database"):
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.OVERWRITE,
+                source_table=DeltaTableStep(table="test"),
+                **opts,
+            )
+
+    def test_sync_requires_schema(self):
+        """SynchronizeDeltaToSnowflakeTask must fail when 'schema' is missing."""
+        opts = {k: v for k, v in COMMON_OPTIONS.items() if k != "schema"}
+        with pytest.raises(pydantic.ValidationError, match="schema"):
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.OVERWRITE,
+                source_table=DeltaTableStep(table="test"),
+                **opts,
+            )
+
+    @mock.patch.object(SynchronizeDeltaToSnowflakeTask, "writer")
+    def test_sync_output_metadata(self, mock_writer, spark):
+        """After successful sync, output must contain target table, mode and source info."""
+        source_table = DeltaTableStep(datbase="klettern", table="test_output_meta")
+
+        df = spark.createDataFrame(
+            data=[("Australia", 100, 3000)],
+            schema=["Country", "NumVaccinated", "AvailableDoses"],
+        )
+        DeltaTableWriter(table=source_table, output_mode=BatchOutputMode.OVERWRITE, df=df).execute()
+
+        task = SynchronizeDeltaToSnowflakeTask(
+            streaming=False,
+            synchronisation_mode=BatchOutputMode.OVERWRITE,
+            **{**COMMON_OPTIONS, "source_table": source_table},
+        )
+
+        with mock.patch.object(SynchronizeDeltaToSnowflakeTask, "drop_table"):
+            task.execute()
+
+        assert task.output.target_table == "foo.bar"
+        assert task.output.synchronisation_mode == "overwrite"
+        assert task.output.streaming is False
+        assert task.output.source_table_name == "klettern.test_output_meta"
+        assert task.output.target_df is not None
+        assert task.output.source_df is not None
+
