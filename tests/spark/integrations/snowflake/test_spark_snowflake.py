@@ -6,6 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 
+import pydantic
+
 from pyspark.sql import types as t
 
 from koheesio.integrations.snowflake.test_utils import mock_query
@@ -103,6 +105,11 @@ class TestTableQuery:
     def test_execute(self, dummy_spark):
         k = DbTableQuery(**self.options).execute()
         assert k.df.count() == 3
+
+    def test_query_and_table_mutually_exclusive(self, spark):
+        """DbTableQuery reads via `table`; also passing `query` is ambiguous and must error clearly."""
+        with pytest.raises(pydantic.ValidationError):
+            DbTableQuery(query="SELECT 1", **self.options)
 
 
 class TestCreateOrReplaceTableFromDataFrame:

@@ -346,6 +346,20 @@ class DbTableQuery(SnowflakeReader):
 
     dbtable: str = Field(default=..., alias="table", description="The name of the table")
 
+    @model_validator(mode="after")
+    def _validate_table_query_exclusive(self) -> "DbTableQuery":
+        """`DbTableQuery` reads a table via `table`/`dbtable`; passing `query` as well is ambiguous.
+
+        `table` and `query` are mutually exclusive for this reader. Surfacing this as a clear error
+        avoids the silent "query wins, dbtable ignored" behavior inherited from `JdbcReader`.
+        """
+        if self.query:
+            raise ValueError(
+                "`DbTableQuery` reads a table via `table`/`dbtable`; do not also provide `query`. "
+                "Use the `Query` reader instead if you want to run a custom query."
+            )
+        return self
+
 
 class TableExists(SnowflakeTableStep):
     """
@@ -717,6 +731,16 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
 
     writer_: Optional[Union[ForEachBatchStreamWriter, SnowflakeWriter]] = None
 
+    class Output(SparkStep.Output):
+        """Output class for SynchronizeDeltaToSnowflakeTask describing the synchronization result"""
+
+        source_df: Optional[DataFrame] = Field(
+            default=None, description="The source DataFrame that was read from the Delta source table"
+        )
+        target_df: Optional[DataFrame] = Field(
+            default=None, description="The DataFrame that was written to the Snowflake target table"
+        )
+
     @field_validator("staging_table_name")
     def _validate_staging_table(cls, staging_table_name: str) -> str:
         """Validate the staging table name and return it if it's valid."""
@@ -740,6 +764,30 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
         return values
 
     @model_validator(mode="before")
+    def _validate_target_table(cls, values: Dict) -> Dict:
+        """Ensure a non-empty target table is provided so configuration problems surface early.
+
+        `target_table` is required and identifies the Snowflake table to synchronize to. Raising here
+        (rather than letting an empty value fail deep inside the writer/merge query) gives the user a
+        clear, early error.
+        """
+        target_table = values.get("target_table")
+        if target_table is None:
+            raise ValueError(
+                "`target_table` is required: provide the Snowflake table to synchronize to "
+                "(e.g. 'MY_SCHEMA.MY_TABLE')."
+            )
+        if isinstance(target_table, str):
+            stripped = target_table.strip()
+            if not stripped:
+                raise ValueError(
+                    "`target_table` must not be empty or whitespace: provide the Snowflake table to "
+                    "synchronize to (e.g. 'MY_SCHEMA.MY_TABLE')."
+                )
+            values["target_table"] = stripped
+        return values
+
+    @model_validator(mode="before")
     def _synch_mode_check(cls, values: Dict) -> Dict:
         """Validate requirements for various synchronisation modes"""
         streaming = values.get("streaming")
@@ -758,6 +806,12 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
             raise ValueError("Synchronisation mode can't be 'MERGE' with streaming disabled")
         if synchronisation_mode == BatchOutputMode.MERGE and len(key_columns) < 1:  # type: ignore
             raise ValueError("MERGE synchronisation mode requires a list of PK columns in `key_columns`.")
+
+        if values.get("enable_deletion") and synchronisation_mode != BatchOutputMode.MERGE:
+            raise ValueError(
+                "`enable_deletion` is only supported in 'MERGE' synchronisation mode; it cannot be "
+                f"combined with '{synchronisation_mode.value}' mode."
+            )
 
         return values
 
@@ -1019,6 +1073,11 @@ class SynchronizeDeltaToSnowflakeTask(SnowflakeSparkStep):
             if self.streaming:
                 self.writer.await_termination()  # type: ignore
             self.drop_table(self.staging_table)
+
+        self.log.info(
+            f"Synchronized Delta source '{self.source_table.table_name}' to Snowflake target "
+            f"'{self.target_table}' using '{self.synchronisation_mode.value}' mode (streaming={self.streaming})."
+        )
 
 
 class TagSnowflakeQuery(Step, ExtraParamsMixin):

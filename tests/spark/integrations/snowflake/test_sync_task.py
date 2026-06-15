@@ -395,6 +395,46 @@ class TestValidations:
                 **{**COMMON_OPTIONS, "key_columns": []},
             )
 
+    def test_snowflake_sync_task_missing_target_table(self):
+        """A missing target_table should fail at config time with a clear error."""
+        options = {k: v for k, v in self.options.items() if k != "target_table"}
+        with pytest.raises(pydantic.ValidationError):
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.APPEND,
+                **options,
+            )
+
+    @pytest.mark.parametrize("bad_target", ["", "   "])
+    def test_snowflake_sync_task_empty_target_table(self, bad_target: str):
+        """An empty or whitespace-only target_table should fail at config time."""
+        with pytest.raises(pydantic.ValidationError):
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.APPEND,
+                **{**self.options, "target_table": bad_target},
+            )
+
+    def test_snowflake_sync_task_enable_deletion_requires_merge(self):
+        """`enable_deletion` is only valid in MERGE mode; other modes must raise a clear error."""
+        with pytest.raises(pydantic.ValidationError):
+            SynchronizeDeltaToSnowflakeTask(
+                streaming=False,
+                synchronisation_mode=BatchOutputMode.APPEND,
+                enable_deletion=True,
+                **self.options,
+            )
+
+    def test_snowflake_sync_task_enable_deletion_allowed_with_merge(self):
+        """`enable_deletion` combined with MERGE is a valid configuration."""
+        task = SynchronizeDeltaToSnowflakeTask(
+            streaming=True,
+            synchronisation_mode=BatchOutputMode.MERGE,
+            enable_deletion=True,
+            **self.options,
+        )
+        assert task.enable_deletion is True
+
     @pytest.mark.parametrize(
         "sync_mode, streaming, expected_writer_type",
         [
