@@ -13,7 +13,7 @@ from koheesio.spark.transformations.strings.clean import (
     CleanseStrings,
     StringCleanupAction,
 )
-from koheesio.spark.transformations.strings.trim import Trim
+from koheesio.spark.transformations.strings.trim import LTrim, RTrim, Trim
 from koheesio.spark.utils import show_string
 
 pytestmark = pytest.mark.spark
@@ -52,6 +52,18 @@ def _column_values(df, column):
             [
                 dict(name=" Alice ", city="  ", name_clean="alice", city_clean=""),
                 dict(name="BOB  ", city="Delft", name_clean="bob", city_clean="delft"),
+                dict(name=None, city=None, name_clean=None, city_clean=None),
+            ],
+        ),
+        (
+            # description: default actions (trim + empty_to_null) into suffixed target columns. Null lands in the
+            # suffixed columns and the source columns are preserved unchanged. "  " -> trim "" -> empty_to_null None.
+            dict(columns=["name", "city"], target_column="clean"),
+            [[" Alice ", "  "], ["BOB  ", "Delft"], [None, None]],
+            ["name", "city"],
+            [
+                dict(name=" Alice ", city="  ", name_clean="Alice", city_clean=None),
+                dict(name="BOB  ", city="Delft", name_clean="BOB", city_clean="Delft"),
                 dict(name=None, city=None, name_clean=None, city_clean=None),
             ],
         ),
@@ -117,6 +129,21 @@ def test_null_handling(actions, expected, spark):
     assert _column_values(output_df, "val") == expected
 
 
+def test_action_order_is_significant(spark):
+    """Order matters: running empty_to_null *before* trim leaves whitespace-only values as empty strings,
+    whereas the default trim-then-empty_to_null turns them into null."""
+    input_df = spark.createDataFrame([[" hello "], ["   "], [""], [None]], ["val"])
+
+    empty_then_trim = CleanseStrings(column="val", actions=["empty_to_null", "trim"]).transform(input_df)
+    trim_then_empty = CleanseStrings(column="val", actions=["trim", "empty_to_null"]).transform(input_df)
+
+    # empty_to_null runs first: only the literal "" becomes null; "   " is not empty yet, so it survives the
+    # null conversion and is only afterwards trimmed down to "".
+    assert _column_values(empty_then_trim, "val") == ["hello", "", None, None]
+    # default order: trim first turns "   " into "", which empty_to_null then converts to null.
+    assert _column_values(trim_then_empty, "val") == ["hello", None, None, None]
+
+
 #
 # Single-column behavior matches the dedicated transformations (backward compatibility)
 #
@@ -124,6 +151,8 @@ def test_null_handling(actions, expected, spark):
     "action,sibling_cls",
     [
         ("trim", Trim),
+        ("ltrim", LTrim),
+        ("rtrim", RTrim),
         ("lower", LowerCase),
         ("upper", UpperCase),
         ("title", TitleCase),
