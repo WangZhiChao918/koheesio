@@ -33,6 +33,7 @@ REQUEST_METADATA_SCHEMA = StructType(
         StructField("request_url", StringType(), True),
         StructField("status_code", IntegerType(), True),
         StructField("page", IntegerType(), True),
+        StructField("offset", IntegerType(), True),
     ]
 )
 
@@ -50,9 +51,9 @@ class RestApiReader(Reader):
     spark_schema : Union[str, StructType, List[str], Tuple[str, ...], AtomicType]
         The pyspark schema of the response.
     include_request_metadata : bool, optional, default=False
-        When True, attach request metadata (request_url, status_code, page) to the output DataFrame
-        as a nested struct column. Note: status_code is unavailable for the async transport and
-        page is only populated for paginated requests; missing values are returned as null.
+        When True, attach request metadata (request_url, status_code, page, offset) to the output
+        DataFrame as a nested struct column. Note: status_code is unavailable for the async transport
+        and page/offset are only populated for paginated requests; missing values are returned as null.
     metadata_column : str, optional, default="_request_metadata"
         Name of the nested struct column holding request metadata when include_request_metadata is
         True. Requires spark_schema to resolve to a StructType (StructType or DDL string).
@@ -140,8 +141,9 @@ class RestApiReader(Reader):
     include_request_metadata: bool = Field(
         default=False,
         description=(
-            "When True, attach request metadata (request_url, status_code, page) to the output "
-            "DataFrame as a nested struct column. Defaults to False, leaving the output unchanged."
+            "When True, attach request metadata (request_url, status_code, page, offset) to the "
+            "output DataFrame as a nested struct column. Defaults to False, leaving the output "
+            "unchanged."
         ),
     )
     metadata_column: str = Field(
@@ -211,7 +213,7 @@ class RestApiReader(Reader):
     def _collect_with_metadata(
         self, raw_data: Union[HttpGetStep.Output, AsyncHttpGetStep.Output]
     ) -> List[Tuple[dict, dict]]:
-        """Pair each response record with its request metadata (request_url, status_code, page)."""
+        """Pair each response record with its request metadata (request_url, status_code, page, offset)."""
         results: List[Tuple[dict, dict]] = []
 
         # Paginated transport carries real per-page metadata. Checked first because its Output is a
@@ -222,6 +224,9 @@ class RestApiReader(Reader):
                     "request_url": page_response.get("url"),
                     "status_code": page_response.get("status_code"),
                     "page": page_response.get("page"),
+                    # offset is a single request-level config (the starting page), constant
+                    # across pages; read from the transport since paginated_responses omits it.
+                    "offset": self.transport.offset,
                 }
                 results.extend(self._expand_records(page_response.get("data"), metadata))
             return results
@@ -232,13 +237,14 @@ class RestApiReader(Reader):
                 "request_url": str(response_url) if response_url is not None else None,
                 "status_code": raw_data.status_code,
                 "page": None,
+                "offset": None,
             }
             results.extend(self._expand_records(raw_data.response_json, metadata))
             return results
 
         if isinstance(raw_data, AsyncHttpGetStep.Output):
             for record_data, url in raw_data.responses_urls or []:  # type: ignore[union-attr]
-                metadata = {"request_url": str(url), "status_code": None, "page": None}
+                metadata = {"request_url": str(url), "status_code": None, "page": None, "offset": None}
                 results.extend(self._expand_records(record_data, metadata))
             return results
 

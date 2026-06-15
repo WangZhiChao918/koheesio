@@ -188,6 +188,8 @@ def test_paginated_api_with_metadata():
         assert meta["page"] == row["page"]
         assert meta["status_code"] == 200
         assert meta["request_url"] == f"https://api.example.com/data?page={row['page']}"
+        # offset defaults to 1 and is constant across all pages.
+        assert meta["offset"] == 1
 
     for page in (1, 2, 3):
         assert sum(1 for row in rows if row["_request_metadata"]["page"] == page) == 10
@@ -224,6 +226,7 @@ def test_rest_api_reader_with_metadata():
     assert meta["status_code"] == 200
     assert meta["request_url"] == str(ASYNC_GET_ENDPOINT)
     assert meta["page"] is None
+    assert meta["offset"] is None
 
 
 @pytest.mark.asyncio
@@ -252,3 +255,37 @@ async def test_async_rest_api_reader_with_metadata(mock_aiohttp):
         assert meta["request_url"] == f"{ASYNC_BASE_URL}/get"
         assert meta["status_code"] is None
         assert meta["page"] is None
+        assert meta["offset"] is None
+
+
+@responses.activate(registry=OrderedRegistry)
+def test_paginated_api_metadata_includes_offset():
+    """A non-default offset is captured in metadata and stays distinct from the per-page 'page'."""
+    # With offset=2 and pages=3 the reader fetches pages 2 and 3 (range(offset, pages + 1)).
+    for i in (2, 3):
+        data = [{"id": j, "page": i, "value": f"data_{i}_{j}"} for j in range(1, 4)]  # 3 records per page
+        responses.get(f"https://api.example.com/data?page={i}", json=data)
+
+    transport = PaginatedHttpGetStep(
+        url="https://api.example.com/data?page={page}", paginate=True, pages=3, offset=2
+    )
+    task = RestApiReader(
+        transport=transport,
+        spark_schema="id: int, page:int, value: string",
+        include_request_metadata=True,
+    )
+
+    task.execute()
+
+    rows = [row.asDict(recursive=True) for row in task.output.df.collect()]
+    assert len(rows) == 6  # pages 2 and 3, 3 records each
+
+    for row in rows:
+        meta = row["_request_metadata"]
+        # offset is the (constant) starting-page config, independent of the per-page number.
+        assert meta["offset"] == 2
+        assert meta["page"] in (2, 3)
+
+    # The page=3 rows prove offset does not merely echo the page number.
+    page_three = [row for row in rows if row["_request_metadata"]["page"] == 3]
+    assert page_three and all(row["_request_metadata"]["offset"] == 2 for row in page_three)
