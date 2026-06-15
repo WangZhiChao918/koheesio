@@ -4,7 +4,7 @@ import pytest
 
 from pydantic import SecretStr
 
-from koheesio.context import Context
+from koheesio.context import Context, ContextSource
 from koheesio.utils import get_project_root
 
 test_dict = dict(foo="bar", nested=dict(bar="baz"), listed=["first_item", dict(deeply_nested="lorem ipsum")])
@@ -403,3 +403,96 @@ def test_from_toml():
     actual = Context.from_toml(toml_str)
     assert isinstance(actual, Context)
     assert actual["foo"] == "bar"
+
+
+def test_no_source_recorded_by_default():
+    """A Context not loaded from a file has no source info, and tracking never leaks into data."""
+    context = Context({"foo": "bar"})
+
+    # no provenance recorded
+    assert context.get_source("foo") is None
+    assert context.get_source_history("foo") is None
+    assert context.sources() == {}
+
+    # normal dict-like behavior is completely unaffected
+    assert context.to_dict() == {"foo": "bar"}
+    assert list(context) == ["foo"]
+    assert len(context) == 1
+    assert "__koheesio_provenance__" not in context.to_dict()
+
+    # default is returned for keys without recorded source
+    assert context.get_source("missing", "n/a") == "n/a"
+    assert context.get_source_history("missing", []) == []
+
+
+def test_source_recorded_from_yaml_file():
+    """Loading from a yaml file records the file path as the source of each top-level key."""
+    context = Context.from_yaml(CONTEXT_FOLDER / "common.yml")
+
+    source = context.get_source("top_level")
+    assert isinstance(source, ContextSource)
+    assert source.source.endswith("common.yml")
+    assert source.env is None
+
+    # only real data keys are tracked; provenance does not change the data
+    assert set(context.sources()) == {"top_level"}
+    assert "sources" in context.to_dict()["top_level"]
+
+
+def test_source_records_env_label():
+    """An explicit env label is stored alongside the file path."""
+    context = Context.from_yaml(CONTEXT_FOLDER / "dev.yml", env="dev")
+
+    env_source = context.get_source("env")
+    assert env_source.env == "dev"
+    assert env_source.source.endswith("dev.yml")
+
+
+def test_source_from_raw_string_uses_marker():
+    """Loading from a raw string (not a file) records a readable marker instead of a path."""
+    assert Context.from_yaml("foo: bar").get_source("foo").source == "<yaml string>"
+    assert Context.from_json('{"foo": "bar"}').get_source("foo").source == "<json string>"
+    assert Context.from_toml('foo = "bar"').get_source("foo").source == "<toml string>"
+
+
+def test_merge_records_override_order_recursive():
+    """Recursive multi-source merge records the override chain (oldest first) per top-level key."""
+    common = Context.from_yaml(CONTEXT_FOLDER / "common.yml", env="common")
+    dev = Context.from_yaml(CONTEXT_FOLDER / "dev.yml", env="dev")
+
+    merged = common.merge(dev, recursive=True)
+
+    # "top_level" exists in both files -> chain shows common first, then dev (dev wins)
+    history = merged.get_source_history("top_level")
+    assert [s.env for s in history] == ["common", "dev"]
+    assert history[0].source.endswith("common.yml")
+    assert history[1].source.endswith("dev.yml")
+    assert merged.get_source("top_level").env == "dev"
+
+    # "env" only exists in dev.yml
+    assert merged.get_source("env").env == "dev"
+    assert merged.get_source("env").source.endswith("dev.yml")
+
+    # data is unchanged by source tracking
+    assert merged.to_dict() == {
+        "env": "dev",
+        "top_level": {
+            "sources": {
+                "foo_table": {"database": "foo_db_dev", "table_name": "foo_table"},
+                "bar_table": {"database": "bar_db_dev", "table_name": "bar_table"},
+                "baz_table": {"database": "baz_db", "table_name": "baz_table"},
+            }
+        },
+    }
+
+
+def test_merge_records_override_order_non_recursive():
+    """Non-recursive merge also records the override chain, with the incoming source winning."""
+    left = Context.from_yaml("k: v1", env="a")
+    right = Context.from_yaml("k: v2", env="b")
+
+    merged = left.merge(right)
+
+    assert merged["k"] == "v2"
+    assert [s.env for s in merged.get_source_history("k")] == ["a", "b"]
+    assert merged.get_source("k").env == "b"

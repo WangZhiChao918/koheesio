@@ -13,8 +13,9 @@ For a comprehensive guide on the usage, examples, and additional features of the
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterator, Union
+from typing import Any, Dict, Iterator, List, Optional, Union
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 import re
 
@@ -22,7 +23,30 @@ import jsonpickle  # type: ignore[import-untyped]
 import tomli
 import yaml
 
-__all__ = ["Context"]
+__all__ = ["Context", "ContextSource"]
+
+# Reserved key used to stash source-tracking metadata inside a Context's ``__dict__``.
+# It is deliberately filtered out of ``to_dict()`` and ``__str__`` so that source tracking never
+# affects normal dict-like access, iteration, length, merging, or (de)serialization.
+_PROVENANCE_KEY = "__koheesio_provenance__"
+
+
+@dataclass(frozen=True)
+class ContextSource:
+    """Describes where a Context value originated, for debugging multi-source configurations.
+
+    Parameters
+    ----------
+    source:
+        Human-readable origin of the value. For values loaded from a file this is the file path;
+        for values loaded from a raw string it is a marker such as ``"<yaml string>"``.
+    env:
+        Optional environment label supplied by the caller (e.g. ``"dev"``, ``"prod"``), useful for
+        distinguishing which environment overlay contributed a value.
+    """
+
+    source: str
+    env: Optional[str] = None
 
 
 class Context(Mapping):
@@ -61,6 +85,12 @@ class Context(Mapping):
         Creates Context object from the given dict.
     from_yaml(yaml_file: str | Path) -> Context
         Creates Context object from a given yaml file.
+    get_source(key: str, default: Any = None) -> ContextSource | None
+        Return the effective source of a top-level key (debug aid for multi-source configs).
+    get_source_history(key: str, default: Any = None) -> list[ContextSource] | None
+        Return the full override chain for a top-level key, oldest first.
+    sources() -> Dict[str, ContextSource]
+        Return a mapping of every tracked top-level key to its effective source.
     from_json(json_file: str | Path) -> Context
         Creates Context object from a given json file.
 
@@ -93,7 +123,7 @@ class Context(Mapping):
 
     def __str__(self) -> str:
         """Returns a string representation of the Context."""
-        return str(dict(self.__dict__))
+        return str({k: v for k, v in self.__dict__.items() if k != _PROVENANCE_KEY})
 
     def __repr__(self) -> str:
         """Returns a string representation of the Context."""
@@ -189,7 +219,7 @@ class Context(Mapping):
         return cls(kwargs)
 
     @classmethod
-    def from_json(cls, json_file_or_str: Union[str, Path]) -> Context:
+    def from_json(cls, json_file_or_str: Union[str, Path], env: Optional[str] = None) -> Context:
         """Creates Context object from a given json file
 
         Note: jsonpickle is used to serialize/deserialize the Context object. This is done to allow for objects to be
@@ -222,6 +252,8 @@ class Context(Mapping):
         ----------
         json_file_or_str : Union[str, Path]
             Pathlike string or Path that points to the json file or string containing json
+        env : Optional[str], optional, default=None
+            Optional environment label recorded as the source environment for debugging.
 
         Returns
         -------
@@ -232,18 +264,23 @@ class Context(Mapping):
         # check if json_str is pathlike
         if (json_file := Path(json_file_or_str)).exists():
             json_str = json_file.read_text(encoding="utf-8")
+            source = str(json_file)
+        else:
+            source = "<json string>"
 
         json_dict = jsonpickle.loads(json_str)
-        return cls.from_dict(json_dict)
+        return cls.from_dict(json_dict)._record_sources(source=source, env=env)
 
     @classmethod
-    def from_toml(cls, toml_file_or_str: Union[str, Path]) -> Context:
+    def from_toml(cls, toml_file_or_str: Union[str, Path], env: Optional[str] = None) -> Context:
         """Creates Context object from a given toml file
 
         Parameters
         ----------
         toml_file_or_str: Union[str, Path]
             Pathlike string or Path that points to the toml file or string containing toml
+        env : Optional[str], optional, default=None
+            Optional environment label recorded as the source environment for debugging.
 
         Returns
         -------
@@ -253,20 +290,24 @@ class Context(Mapping):
         # check if toml_str is pathlike
         if (toml_file := Path(toml_file_or_str)).exists():
             toml_str = toml_file.read_text(encoding="utf-8")
+            source = str(toml_file)
         else:
             toml_str = str(toml_file_or_str)
+            source = "<toml string>"
 
         toml_dict = tomli.loads(toml_str)
-        return cls.from_dict(toml_dict)
+        return cls.from_dict(toml_dict)._record_sources(source=source, env=env)
 
     @classmethod
-    def from_yaml(cls, yaml_file_or_str: str) -> Context:
+    def from_yaml(cls, yaml_file_or_str: str, env: Optional[str] = None) -> Context:
         """Creates Context object from a given yaml file
 
         Parameters
         ----------
         yaml_file_or_str: str or Path
             Pathlike string or Path that points to the yaml file, or string containing yaml
+        env : Optional[str], optional, default=None
+            Optional environment label recorded as the source environment for debugging.
 
         Returns
         -------
@@ -277,13 +318,15 @@ class Context(Mapping):
         # check if yaml_str is pathlike
         if (yaml_file := Path(yaml_file_or_str)).exists():
             yaml_str = yaml_file.read_text(encoding="utf-8")
+            source = str(yaml_file)
         else:
             yaml_str = str(yaml_file_or_str)
+            source = "<yaml string>"
 
         # Bandit: disable yaml.load warning
         yaml_dict = yaml.load(yaml_str, Loader=yaml.Loader)  # nosec B506: yaml_load
 
-        return cls.from_dict(yaml_dict)
+        return cls.from_dict(yaml_dict)._record_sources(source=source, env=env)
 
     def add(self, key: str, value: Any) -> Context:
         """Add a key/value pair to the context"""
@@ -385,6 +428,91 @@ class Context(Mapping):
         """alias to to_dict()"""
         return self.to_dict()
 
+    def get_source(self, key: str, default: Any = None) -> Any:
+        """Return the *effective* source of a top-level key, for debugging multi-source configs.
+
+        The effective source is the last entry in the key's override chain, i.e. the source that
+        "won" when several configs were merged. Returns `default` when the key has no recorded
+        source (for example, a Context that was never loaded from a file or labelled with `env`).
+
+        Note: source tracking is recorded per top-level key.
+
+        Parameters
+        ----------
+        key: str
+            Top-level key to look up.
+        default: Any
+            Value to return when no source was recorded for `key`.
+
+        Returns
+        -------
+        ContextSource or default
+        """
+        history = self._provenance().get(key)
+        return history[-1] if history else default
+
+    def get_source_history(self, key: str, default: Any = None) -> Any:
+        """Return the full override chain for a top-level key, oldest first.
+
+        Each element is a `ContextSource`. The first element is the source that originally set the
+        key; the last element is the effective (winning) source. Returns `default` when the key has
+        no recorded source.
+
+        Parameters
+        ----------
+        key: str
+            Top-level key to look up.
+        default: Any
+            Value to return when no source was recorded for `key`.
+
+        Returns
+        -------
+        list[ContextSource] or default
+        """
+        history = self._provenance().get(key)
+        return list(history) if history else default
+
+    def sources(self) -> Dict[str, ContextSource]:
+        """Return a mapping of every tracked top-level key to its effective source.
+
+        Returns an empty dict when no source information has been recorded. Handy for dumping a
+        full "where did each value come from" overview when debugging a merged configuration.
+
+        Returns
+        -------
+        Dict[str, ContextSource]
+        """
+        return {key: history[-1] for key, history in self._provenance().items() if history}
+
+    def _provenance(self) -> Dict[str, List[ContextSource]]:
+        """Internal: return the source-tracking metadata, or an empty dict when none is recorded."""
+        return self.__dict__.get(_PROVENANCE_KEY, {})
+
+    def _record_sources(self, source: str, env: Optional[str] = None) -> Context:
+        """Internal: stamp every current top-level key with the given source. Returns `self`."""
+        provenance = {key: [ContextSource(source=source, env=env)] for key in self.keys()}
+        if provenance:
+            self.__dict__[_PROVENANCE_KEY] = provenance
+        return self
+
+    def _merge_provenance(
+        self, left: Dict[str, List[ContextSource]], right: Dict[str, List[ContextSource]]
+    ) -> Context:
+        """Internal: combine two provenance maps onto `self` in override order. Returns `self`.
+
+        For each key present in `self`, the chain from `left` (lower priority) is placed before the
+        chain from `right` (higher priority / incoming), so the resulting order reflects how the
+        value was overridden across sources.
+        """
+        combined: Dict[str, List[ContextSource]] = {}
+        for key in self.keys():
+            chain = [*left.get(key, []), *right.get(key, [])]
+            if chain:
+                combined[key] = chain
+        if combined:
+            self.__dict__[_PROVENANCE_KEY] = combined
+        return self
+
     def merge(self, context: Context, recursive: bool = False) -> Context:
         """Merge this context with the context of another, where the incoming context has priority.
 
@@ -400,11 +528,18 @@ class Context(Mapping):
         Context
             updated context
         """
-        if recursive:
-            return Context.from_dict(self._recursive_merge(target_context=self, merge_context=context).to_dict())
+        # Snapshot source provenance from both sides before merging the data, so the override order
+        # can be recorded (this context first, the incoming context last == highest priority).
+        self_provenance = self._provenance()
+        incoming_provenance = context._provenance()
 
-        # just merge on the top level keys
-        return Context.from_dict({**self.to_dict(), **context.to_dict()})
+        if recursive:
+            merged = Context.from_dict(self._recursive_merge(target_context=self, merge_context=context).to_dict())
+        else:
+            # just merge on the top level keys
+            merged = Context.from_dict({**self.to_dict(), **context.to_dict()})
+
+        return merged._merge_provenance(self_provenance, incoming_provenance)
 
     def process_value(self, value: Any) -> Any:
         """Processes the given value, converting dictionaries to Context objects as needed."""
@@ -427,6 +562,9 @@ class Context(Mapping):
         result = {}
 
         for key, value in self.__dict__.items():
+            if key == _PROVENANCE_KEY:
+                # source-tracking metadata is internal and must never surface as data
+                continue
             if isinstance(value, Context):
                 result[key] = value.to_dict()
             elif isinstance(value, list):
