@@ -466,6 +466,24 @@ class PaginatedHttpGetStep(HttpGetStep):
         "for example: api.example.com/data?limit={limit}",
     )
 
+    class Output(HttpGetStep.Output):
+        """Output class for PaginatedHttpGetStep.
+
+        In addition to the flattened ``response_json`` inherited from ``HttpGetStep.Output``, this
+        retains the per-page responses together with their request metadata so that downstream
+        consumers (e.g. ``RestApiReader``) can attribute each record to the page it came from.
+        """
+
+        paginated_responses: Optional[List[Dict[str, Any]]] = Field(
+            default=None,
+            description=(
+                "Per-page responses with metadata. Each entry is a dict with keys 'data', 'url', "
+                "'status_code' and 'page'. Populated when paginate=True; 'response_json' remains "
+                "the flattened list across all pages."
+            ),
+            repr=False,
+        )
+
     def _adjust_params(self) -> Dict[str, Any]:
         """
         Adjusts the parameters by removing the 'paginate' key.
@@ -537,6 +555,7 @@ class PaginatedHttpGetStep(HttpGetStep):
         # Set up pagination parameters
         offset, pages = (self.offset, self.pages + 1) if self.paginate else (1, 1)  # type: ignore
         data = []
+        paginated_responses: List[Dict[str, Any]] = []
         _basic_url = self.url
 
         for page in range(offset, pages):  # type: ignore[arg-type]
@@ -546,7 +565,16 @@ class PaginatedHttpGetStep(HttpGetStep):
             self.url = self._url(basic_url=_basic_url, page=page)
 
             with self._request() as response:
-                if isinstance(response_json := response.json(), list):
+                response_json = response.json()
+                paginated_responses.append(
+                    {
+                        "data": response_json,
+                        "url": str(response.url),
+                        "status_code": response.status_code,
+                        "page": page,
+                    }
+                )
+                if isinstance(response_json, list):
                     data += response_json
                 else:
                     data.append(response_json)
@@ -556,3 +584,4 @@ class PaginatedHttpGetStep(HttpGetStep):
         self.output.response_raw = None
         self.output.raw_payload = None
         self.output.status_code = None
+        self.output.paginated_responses = paginated_responses
